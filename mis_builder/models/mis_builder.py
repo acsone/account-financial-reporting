@@ -517,7 +517,9 @@ class mis_report_instance_period(orm.Model):
         all_code.extend([_get_bal_code(bal, False) for bal in b])
         all_code.extend([_get_bal_code(bal, True) for bal in bs])
 
-        domain.append(('account_id.code', 'in', all_code))
+        all_code_ids = self.pool['account.account'].search(
+            cr, uid, [('code', 'in', all_code)], context=context)
+        domain.append(('account_id', 'child_of', all_code_ids))
 
         # compute date/period
         period_ids = []
