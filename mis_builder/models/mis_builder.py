@@ -33,6 +33,7 @@ from openerp.tools.safe_eval import safe_eval
 from openerp.tools.translate import _
 from openerp import tools
 from collections import OrderedDict
+from aep import AccountingExpressionProcessor
 
 
 class AutoStruct(object):
@@ -64,40 +65,8 @@ def _python_var(var_str):
     return re.sub(r'\W|^(?=\d)', '_', var_str).lower()
 
 
-def _python_bal_var(account_code, is_solde=False):
-    prefix = 'bals_' if is_solde else 'bal_'
-    return prefix + re.sub(r'\W', '_', account_code)
-
-
-def _get_bal_code(bal_var, is_solde=False):
-    prefix = 'bals_' if is_solde else 'bal_'
-    return bal_var.replace(prefix, '')
-
-
-def _get_bal_vars_in_expr(expr, is_solde=False):
-    prefix = 'bals_' if is_solde else 'bal_'
-    return re.findall(r'\b%s\w+' % prefix, expr)
-
-
-def _get_vars_in_expr(expr, varnames=None):
-    if not varnames:
-        return []
-    varnames_re = r'\b' + r'\b|\b'.join(varnames) + r'\b'
-    return re.findall(varnames_re, expr)
-
-
-def _get_bal_vars_in_report(report, is_solde=False):
-    res = set()
-    for kpi in report.kpi_ids:
-        for bal_var in _get_bal_vars_in_expr(kpi.expression, is_solde):
-            res.add(bal_var)
-    return res
-
-
 def _is_valid_python_var(name):
-    return re.match("[_A-Za-z][_a-zA-Z0-9]*$", name) \
-        and not name.startswith('bal_') \
-        and not name.startswith('bals_')
+    return re.match("[_A-Za-z][_a-zA-Z0-9]*$", name)
 
 
 class mis_report_kpi(orm.Model):
@@ -506,141 +475,102 @@ class mis_report_instance_period(orm.Model):
          'Period name should be unique by report'),
     ]
 
-    def compute_domain(self, cr, uid, ids, bal_, context=None):
+    def compute_domain(self, cr, uid, ids, account_, context=None):
         if isinstance(ids, (int, long)):
             ids = [ids]
         domain = []
-        # extract all bal code
-        b = _get_bal_vars_in_expr(bal_, is_solde=False)
-        bs = _get_bal_vars_in_expr(bal_, is_solde=True)
-        all_code = []
-        all_code.extend([_get_bal_code(bal, False) for bal in b])
-        all_code.extend([_get_bal_code(bal, True) for bal in bs])
-
-        all_code_ids = self.pool['account.account'].search(
-            cr, uid, [('code', 'in', all_code)], context=context)
-        domain.append(('account_id', 'child_of', all_code_ids))
-
-        # compute date/period
-        period_ids = []
-        date_from = None
-        date_to = None
-
-        period_obj = self.pool['account.period']
-
-        for c in self.browse(cr, uid, ids, context=context):
-            target_move = c.report_instance_id.target_move
+        this = self.browse(cr, uid, ids, context=context)[0]
+        aep = AccountingExpressionProcessor(cr)
+        aep.parse_expr(account_)
+        aep.done_parsing(cr, uid, [('company_id', '=',
+                         this.report_instance_id.company_id.id)],
+                         context=context)
+        domain.extend(aep.get_aml_domain_for_expr(account_))
+        if domain != []:
+            # compute date/period
+            period_ids = []
+            date_from = None
+            date_to = None
+            period_obj = self.pool['account.period']
+            target_move = this.report_instance_id.target_move
             if target_move == 'posted':
                 domain.append(('move_id.state', '=', target_move))
-            if c.period_from:
+            if this.period_from:
                 compute_period_ids = period_obj.build_ctx_periods(
-                    cr, uid, c.period_from.id, c.period_to.id)
+                    cr, uid, this.period_from.id, this.period_to.id)
                 period_ids.extend(compute_period_ids)
             else:
-                if not date_from or date_from > c.date_from:
-                    date_from = c.date_from
-                if not date_to or date_to < c.date_to:
-                    date_to = c.date_to
-        if period_ids:
+                date_from = this.date_from
+                date_to = this.date_to
+            if period_ids:
+                if date_from:
+                    domain.append('|')
+                domain.append(('period_id', 'in', period_ids))
             if date_from:
-                domain.append('|')
-            domain.append(('period_id', 'in', period_ids))
-        if date_from:
-            domain.extend([('date', '>=', c.date_from),
-                           ('date', '<=', c.date_to)])
-
+                domain.extend([('date', '>=', date_from),
+                               ('date', '<=', date_to)])
+        else:
+            domain = False
         return domain
 
-    def _fetch_bal(self, cr, uid, company_id, bal_vars, context=None,
-                   is_solde=False):
-        account_obj = self.pool['account.account']
-        # TODO: use child of company_id?
-        # first fetch all codes and filter the one we need
-        bal_code = [_get_bal_code(bal, is_solde) for bal in bal_vars]
-
-        account_ids = account_obj.search(
-            cr, uid,
-            ['|', ('company_id', '=', False),
-             ('company_id', '=', company_id),
-             ('code', 'in', bal_code)],
-            context=context)
-
-        # fetch balances
-        account_datas = account_obj.read(
-            cr, uid, account_ids, ['code', 'balance'], context=context)
-        balances = {}
-        for account_data in account_datas:
-            key = _python_bal_var(account_data['code'], is_solde=is_solde)
-            assert key not in balances
-            balances[key] = account_data['balance']
-
-        return balances
-
-    def _fetch_balances(self, cr, uid, c, bal_vars, context=None):
-        """ fetch the general account balances for the given period
-
-        returns a dictionary {bal_<account.code>: account.balance}
-        """
-        if not bal_vars:
-            return {}
-
-        if context is None:
-            context = {}
-
-        search_ctx = dict(context)
-        if c.period_from:
-            search_ctx.update({'period_from': c.period_from.id,
-                               'period_to': c.period_to.id})
-        else:
-            search_ctx.update({'date_from': c.date_from,
-                               'date_to': c.date_to})
-
-        # fetch balances
-        return self._fetch_bal(cr, uid, c.company_id.id, bal_vars, search_ctx)
-
-    def _fetch_balances_solde(self, cr, uid, c, bals_vars, context=None):
-        """ fetch the general account balances solde at the end of
-            the given period
-
-            the period from is computed by searching the last special period
-            with journal entries.
-            If nothing is found, the first period is used.
-
-        returns a dictionary {bals_<account.code>: account.balance.solde}
-        """
-        if context is None:
-            context = {}
-        balances = {}
-        if not bals_vars:
-            return balances
-
-        search_ctx = dict(context)
-        if c.period_to:
-            move_obj = self.pool['account.move']
+    def compute_period_domain(self, cr, uid, period_report, is_solde,
+                              is_initial, context=None):
+        period_obj = self.pool['account.period']
+        move_obj = self.pool['account.move']
+        domain_list = []
+        target_move = period_report.report_instance_id.target_move
+        if target_move == 'posted':
+            domain_list.append(('move_id.state', '=', target_move))
+        if not is_solde and not is_initial:
+            if period_report.period_from:
+                compute_period_ids = period_obj.build_ctx_periods(
+                    cr, uid, period_report.period_from.id,
+                    period_report.period_to.id)
+                domain_list.extend([('period_id', 'in', compute_period_ids)])
+            else:
+                domain_list.extend([('date', '>=', period_report.date_from),
+                                    ('date', '<=', period_report.date_to)])
+        elif period_report.period_from and period_report.period_to:
+            period_to = period_report.period_to
+            if is_initial:
+                move_id = move_obj.search(
+                    cr, uid, [('period_id.special', '=', False),
+                              ('period_id.date_start', '<',
+                               period_to.date_start),
+                              ('company_id', '=',
+                               period_report.company_id.id)],
+                    order="period_id desc", limit=1, context=context)
+                if move_id:
+                    computed_period_to = move_obj.browse(
+                        cr, uid, move_id[0], context=context).period_id.id
+                else:
+                    computed_period_to = self.pool['account.period'].search(
+                        cr, uid, [('company_id', '=',
+                                   period_report.company_id.id)],
+                        order='date_start desc', limit=1)[0]
+                # Change start period to search correctly period from
+                period_to = period_obj.browse(cr, uid, [computed_period_to],
+                                              context=context)[0]
             move_id = move_obj.search(
                 cr, uid, [('period_id.special', '=', True),
-                          ('period_id.date_start', '<=',
-                           c.period_to.date_start)],
+                          ('period_id.date_start', '<=', period_to.date_start),
+                          ('company_id', '=', period_report.company_id.id)],
                 order="period_id desc", limit=1, context=context)
             if move_id:
                 computed_period_from = move_obj.browse(
                     cr, uid, move_id[0], context=context).period_id.id
             else:
                 computed_period_from = self.pool['account.period'].search(
-                    cr, uid, [('company_id', '=', c.company_id.id)],
+                    cr, uid, [('company_id', '=',
+                               period_report.company_id.id)],
                     order='date_start', limit=1)[0]
-            search_ctx.update({'period_from': computed_period_from,
-                               'period_to': c.period_to.id})
-        else:
-            return balances
-
-        # fetch balances
-        return self._fetch_bal(cr, uid, c.company_id.id, bals_vars,
-                               search_ctx, is_solde=True)
+            compute_period_ids = period_obj.build_ctx_periods(
+                cr, uid, computed_period_from, period_to.id)
+            domain_list.extend([('period_id', 'in', compute_period_ids)])
+        return domain_list
 
     def _fetch_queries(self, cr, uid, c, context):
         res = {}
-
         report = c.report_instance_id.report_id
         for query in report.query_ids:
             obj = self.pool[query.model_id.model]
@@ -663,10 +593,9 @@ class mis_report_instance_period(orm.Model):
             obj_datas = obj.read(
                 cr, uid, obj_ids, field_names, context=context)
             res[query.name] = [AutoStruct(**d) for d in obj_datas]
-
         return res
 
-    def _compute(self, cr, uid, lang_id, c, bal_vars, bals_vars, context=None):
+    def _compute(self, cr, uid, lang_id, c, aep, context=None):
         if context is None:
             context = {}
 
@@ -682,17 +611,20 @@ class mis_report_instance_period(orm.Model):
             'len': len,
             'avg': lambda l: sum(l) / float(len(l)),
         }
-        localdict.update(self._fetch_balances(cr, uid, c, bal_vars,
-                                              context=context))
-        localdict.update(self._fetch_balances_solde(cr, uid, c, bals_vars,
-                                                    context=context))
-        localdict.update(self._fetch_queries(cr, uid, c,
-                                             context=context))
+        domain_p = self.compute_period_domain(cr, uid, c, False, False,
+                                              context=context)
+        domain_s = self.compute_period_domain(cr, uid, c, True, False,
+                                              context=context)
+        domain_i = self.compute_period_domain(cr, uid, c, False, True,
+                                              context=context)
+        aep.do_queries(cr, uid, domain_p, domain_i, domain_s, context=context)
+        localdict.update(self._fetch_queries(cr, uid, c, context=context))
 
         for kpi in c.report_instance_id.report_id.kpi_ids:
             try:
                 kpi_val_comment = kpi.expression
-                kpi_val = safe_eval(kpi.expression, localdict)
+                kpi_eval_expression = aep.replace_expr(kpi.expression)
+                kpi_val = safe_eval(kpi_eval_expression, localdict)
             except ZeroDivisionError:
                 kpi_val = None
                 kpi_val_rendered = '#DIV/0'
@@ -829,24 +761,24 @@ class mis_report_instance(orm.Model):
         # empty line name for header
         header = OrderedDict()
         header[''] = {'kpi_name': '', 'cols': [], 'default_style': ''}
-
+        aep = AccountingExpressionProcessor(cr)
         # initialize lines with kpi
         for kpi in r.report_id.kpi_ids:
+            aep.parse_expr(kpi.expression)
             content[kpi.name] = {'kpi_name': kpi.description,
                                  'cols': [],
                                  'default_style': ''}
-
+        aep.done_parsing(cr, uid, [('company_id', '=', r.company_id.id)],
+                         context=context)
         report_instance_period_obj = self.pool.get(
             'mis.report.instance.period')
         kpi_obj = self.pool.get('mis.report.kpi')
 
         period_values = {}
-
-        bal_vars = _get_bal_vars_in_report(r.report_id)
-        bals_vars = _get_bal_vars_in_report(r.report_id, is_solde=True)
-
         lang = self.pool['res.users'].read(
             cr, uid, uid, ['lang'], context=context)['lang']
+        if not lang:
+            lang = 'en_US'
         lang_id = self.pool['res.lang'].search(
             cr, uid, [('code', '=', lang)], context=context)
 
@@ -866,7 +798,7 @@ class mis_report_instance(orm.Model):
                 period.date_from))
             # compute kpi values
             values = report_instance_period_obj._compute(
-                cr, uid, lang_id, period, bal_vars, bals_vars, context=context)
+                cr, uid, lang_id, period, aep, context=context)
             period_values[period.name] = values
             for key in values:
                 content[key]['default_style'] = values[key]['default_style']

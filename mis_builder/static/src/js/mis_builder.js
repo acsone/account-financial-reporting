@@ -29,22 +29,24 @@ openerp.mis_builder = function(instance) {
             var period_id = JSON.parse($(event.target).data("period-id"));
             var period_name = JSON.parse($(event.target).data("period-name"));
             var self = this;
-            if (!(val === null) && ((val_c.indexOf('bal_') >=0) || (val_c.indexOf('bals_') >= 0))){
+            if (!(val === null) && (val_c.indexOf('bal') >=0)){
                 new instance.web.Model("mis.report.instance.period").call(
                     "compute_domain", 
                     [period_id, val_c],
                     {'context': new instance.web.CompoundContext()}
                 ).then(function(result){
-                    self.do_action({
-                        name: val_c + ' - ' + period_name,
-                        domain: JSON.stringify(result),
-                        type: 'ir.actions.act_window',
-                        res_model: "account.move.line",
-                        views: [[false, 'list'], [false, 'form']],
-                        view_type : "list",
-                        view_mode : "list",
-                        target: 'current',
-                    });
+                    if (result != false){
+                        self.do_action({
+                            name: val_c + ' - ' + period_name,
+                            domain: JSON.stringify(result),
+                            type: 'ir.actions.act_window',
+                            res_model: "account.move.line",
+                            views: [[false, 'list'], [false, 'form']],
+                            view_type : "list",
+                            view_mode : "list",
+                            target: 'current',
+                        });
+                    }
                 });
             }
         },
