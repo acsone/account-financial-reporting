@@ -22,18 +22,20 @@
 #
 ##############################################################################
 
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from dateutil import parser
-import traceback
 import re
+import traceback
+
 import pytz
 
 from openerp.osv import orm, fields
+from openerp import tools
 from openerp.tools.safe_eval import safe_eval
 from openerp.tools.translate import _
-from openerp import tools
-from collections import OrderedDict
-from aep import AccountingExpressionProcessor
+
+from .aep import AccountingExpressionProcessor
 
 
 class AutoStruct(object):
@@ -206,7 +208,7 @@ class mis_report_kpi(orm.Model):
             divider_label = ''
         # format number following user language
         value = round(value / float(divider or 1), dp) or 0
-        return '%s %s%s' % (self.pool['res.lang'].format(
+        return u'%s\xA0%s%s' % (self.pool['res.lang'].format(
             cr, uid, lang_id,
             '%%%s.%df' % (
                 sign, dp),
@@ -263,7 +265,8 @@ class mis_report_query(orm.Model):
                                       domain=[('ttype', 'in',
                                                ('date', 'datetime'))]),
         'domain': fields.char(string='Domain'),
-        'report_id': fields.many2one('mis.report', string='Report'),
+        'report_id': fields.many2one('mis.report', string='Report',
+                                     ondelete='cascade'),
     }
 
     _order = 'name'
@@ -442,7 +445,8 @@ class mis_report_instance_period(orm.Model):
                                      multi="dates", string="To period"),
         'sequence': fields.integer(string='Sequence'),
         'report_instance_id': fields.many2one('mis.report.instance',
-                                              string='Report Instance'),
+                                              string='Report Instance',
+                                              ondelete='cascade'),
         'comparison_column_ids': fields.many2many(
             'mis.report.instance.period',
             'mis_report_instance_period_rel',
@@ -475,18 +479,19 @@ class mis_report_instance_period(orm.Model):
          'Period name should be unique by report'),
     ]
 
-    def compute_domain(self, cr, uid, ids, account_, context=None):
+    def drilldown(self, cr, uid, ids, expr, context=None):
         if isinstance(ids, (int, long)):
             ids = [ids]
-        domain = []
         this = self.browse(cr, uid, ids, context=context)[0]
         aep = AccountingExpressionProcessor(cr)
-        aep.parse_expr(account_)
-        aep.done_parsing(cr, uid, [('company_id', '=',
-                         this.report_instance_id.company_id.id)],
+        aep.parse_expr(expr)
+        aep.done_parsing(cr, uid,
+                         [('company_id', '=',
+                           this.report_instance_id.company_id.id)],
                          context=context)
-        domain.extend(aep.get_aml_domain_for_expr(account_))
-        if domain != []:
+        domain = aep.get_aml_domain_for_expr(expr)
+        if domain:
+            # TODO: reuse compute_period_domain
             # compute date/period
             period_ids = []
             date_from = None
@@ -509,11 +514,20 @@ class mis_report_instance_period(orm.Model):
             if date_from:
                 domain.extend([('date', '>=', date_from),
                                ('date', '<=', date_to)])
+            return {
+                'name': expr + ' - ' + this.name,
+                'domain': domain,
+                'type': 'ir.actions.act_window',
+                'res_model': 'account.move.line',
+                'views': [[False, 'list'], [False, 'form']],
+                'view_type': 'list',
+                'view_mode': 'list',
+                'target': 'current',
+            }
         else:
-            domain = False
-        return domain
+            return False
 
-    def compute_period_domain(self, cr, uid, period_report, is_solde,
+    def compute_period_domain(self, cr, uid, period_report, is_end,
                               is_initial, context=None):
         period_obj = self.pool['account.period']
         move_obj = self.pool['account.move']
@@ -521,7 +535,7 @@ class mis_report_instance_period(orm.Model):
         target_move = period_report.report_instance_id.target_move
         if target_move == 'posted':
             domain_list.append(('move_id.state', '=', target_move))
-        if not is_solde and not is_initial:
+        if not is_end and not is_initial:
             if period_report.period_from:
                 compute_period_ids = period_obj.build_ctx_periods(
                     cr, uid, period_report.period_from.id,
@@ -613,50 +627,75 @@ class mis_report_instance_period(orm.Model):
         }
         domain_p = self.compute_period_domain(cr, uid, c, False, False,
                                               context=context)
-        domain_s = self.compute_period_domain(cr, uid, c, True, False,
+        domain_e = self.compute_period_domain(cr, uid, c, True, False,
                                               context=context)
         domain_i = self.compute_period_domain(cr, uid, c, False, True,
                                               context=context)
-        aep.do_queries(cr, uid, domain_p, domain_i, domain_s, context=context)
-        localdict.update(self._fetch_queries(cr, uid, c, context=context))
+        aep.do_queries(cr, uid, domain_p, domain_i, domain_e, context=context)
+        localdict.update(self._fetch_queries(cr, uid, c,
+                                             context=context))
 
-        for kpi in c.report_instance_id.report_id.kpi_ids:
-            try:
-                kpi_val_comment = kpi.expression
-                kpi_eval_expression = aep.replace_expr(kpi.expression)
-                kpi_val = safe_eval(kpi_eval_expression, localdict)
-            except ZeroDivisionError:
-                kpi_val = None
-                kpi_val_rendered = '#DIV/0'
-                kpi_val_comment += '\n\n%s' % (traceback.format_exc(),)
-            except:
-                kpi_val = None
-                kpi_val_rendered = '#ERR'
-                kpi_val_comment += '\n\n%s' % (traceback.format_exc(),)
-            else:
-                kpi_val_rendered = kpi_obj._render(
-                    cr, uid, lang_id, kpi, kpi_val, context=context)
+        compute_queue = c.report_instance_id.report_id.kpi_ids
+        recompute_queue = []
+        while True:
+            for kpi in compute_queue:
+                try:
+                    kpi_val_comment = kpi.name + " = " + kpi.expression
+                    kpi_eval_expression = aep.replace_expr(kpi.expression)
+                    kpi_val = safe_eval(kpi_eval_expression, localdict)
+                except ZeroDivisionError:
+                    kpi_val = None
+                    kpi_val_rendered = '#DIV/0'
+                    kpi_val_comment += '\n\n%s' % (traceback.format_exc(),)
+                except ValueError:
+                    recompute_queue.append(kpi)
+                    kpi_val = None
+                    kpi_val_rendered = '#ERR'
+                    kpi_val_comment += '\n\n%s' % (traceback.format_exc(),)
+                except:
+                    kpi_val = None
+                    kpi_val_rendered = '#ERR'
+                    kpi_val_comment += '\n\n%s' % (traceback.format_exc(),)
+                else:
+                    kpi_val_rendered = kpi_obj._render(
+                        cr, uid, lang_id, kpi, kpi_val, context=context)
 
-            localdict[kpi.name] = kpi_val
-            try:
-                kpi_style = None
-                if kpi.css_style:
-                    kpi_style = safe_eval(kpi.css_style, localdict)
-            except:
-                kpi_style = None
+                localdict[kpi.name] = kpi_val
+                try:
+                    kpi_style = None
+                    if kpi.css_style:
+                        kpi_style = safe_eval(kpi.css_style, localdict)
+                except:
+                    kpi_style = None
 
-            res[kpi.name] = {
-                'val': kpi_val,
-                'val_r': kpi_val_rendered,
-                'val_c': kpi_val_comment,
-                'style': kpi_style,
-                'default_style': kpi.default_css_style or None,
-                'suffix': kpi.suffix,
-                'dp': kpi.dp,
-                'is_percentage': kpi.type == 'pct',
-                'period_id': c.id,
-                'period_name': c.name,
-            }
+                drilldown = (kpi_val is not None and
+                             bool(aep.get_aml_domain_for_expr(kpi.expression)))
+
+                res[kpi.name] = {
+                    'val': kpi_val,
+                    'val_r': kpi_val_rendered,
+                    'val_c': kpi_val_comment,
+                    'style': kpi_style,
+                    'default_style': kpi.default_css_style or None,
+                    'suffix': kpi.suffix,
+                    'dp': kpi.dp,
+                    'is_percentage': kpi.type == 'pct',
+                    'period_id': c.id,
+                    'expr': kpi.expression,
+                    'drilldown': drilldown,
+                }
+
+            if len(recompute_queue) == 0:
+                # nothing to recompute, we are done
+                break
+            if len(recompute_queue) == len(compute_queue):
+                # could not compute anything in this iteration
+                # (ie real Value errors or cyclic dependency)
+                # so we stop trying
+                break
+            # try again
+            compute_queue = recompute_queue
+            recompute_queue = []
 
         return res
 
