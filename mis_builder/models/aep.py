@@ -107,7 +107,7 @@ class AccountingExpressionProcessor(object):
                 else:
                     self._account_ids_by_code[like_code].add(account.id)
 
-    def _parse_mo(self, mo):
+    def _parse_match_object(self, mo):
         """Split a match object corresponding to an accounting variable
 
         Returns field, mode, [account codes], [domain expression].
@@ -136,7 +136,7 @@ class AccountingExpressionProcessor(object):
         so when all expressions have been parsed, we know what to query.
         """
         for mo in self.ACC_RE.finditer(expr):
-            _, mode, account_codes, domain = self._parse_mo(mo)
+            _, mode, account_codes, domain = self._parse_match_object(mo)
             key = (domain, mode)
             if account_codes:
                 self._map_account_ids[key].update(account_codes)
@@ -164,7 +164,7 @@ class AccountingExpressionProcessor(object):
         """
         aml_domains = []
         for mo in self.ACC_RE.finditer(expr):
-            field, mode, account_codes, domain = self._parse_mo(mo)
+            field, mode, account_codes, domain = self._parse_match_object(mo)
             if mode == MODE_INITIAL:
                 continue
             aml_domain = list(domain)
@@ -185,9 +185,119 @@ class AccountingExpressionProcessor(object):
             raise RuntimeError("")  # TODO
         return [('date', '>=', date_start), ('date', '<=', date_end)]
 
-    def get_aml_domain_for_periods(self, period_start, period_end, mode):
-        # TODO
-        raise RuntimeError("not implemented")
+    def _period_has_moves(self, cr, uid, period, context=None):
+        move_model = self.pool['account.move']
+        return bool(move_model.search(cr, uid, [('period_id', '=', period.id)],
+                                      limit=1, context=context))
+
+    def _get_previous_opening_period(self, cr, uid, period, company_id,
+                                     context=None):
+        period_model = self.pool['account.period']
+        period_ids = period_model.search(cr, uid,
+            [('date_start', '<=', period.date_start),
+             ('special', '=', True),
+             ('company_id', '=', company_id)],
+            order="date_start desc",
+            limit=1, context=context)
+        periods = period_model.browse(cr, uid, period_ids, context=context)
+        return periods and periods[0]
+
+    def _get_previous_normal_period(self, cr, uid, period, company_id,
+                                    context=None):
+        period_model = self.pool['account.period']
+        period_ids = period_model.search(cr, uid,
+            [('date_start', '<', period.date_start),
+             ('special', '=', False),
+             ('company_id', '=', company_id)],
+            order="date_start desc",
+            limit=1,
+            context=context)
+        periods = period_model.browse(cr, uid, period_ids, context=context)
+        return periods and periods[0]
+
+    def _get_first_normal_period(self, cr, uid, company_id, context=None):
+        period_model = self.pool['account.period']
+        period_ids = period_model.search(cr, uid,
+            [('special', '=', False),
+             ('company_id', '=', company_id)],
+            order="date_start asc",
+            limit=1,
+            context=context)
+        periods = period_model.browse(cr, uid, period_ids, context=context)
+        return periods and periods[0]
+
+    def _get_period_ids_between(self, cr, uid, period_from, period_to,
+                                company_id, context=None):
+        period_model = self.pool['account.period']
+        period_ids = period_model.search(cr, uid,
+            [('date_start', '>=', period_from.date_start),
+             ('date_stop', '<=', period_to.date_stop),
+             ('special', '=', False),
+             ('company_id', '=', company_id)],
+            context=context)
+        if period_from.special:
+            period_ids.append(period_from.id)
+        return period_ids
+
+    def _get_period_company_ids(self, cr, uid, period_from, period_to,
+                                context=None):
+        period_model = self.pool['account.period']
+        period_ids = period_model.search(cr, uid,
+            [('date_start', '>=', period_from.date_start),
+             ('date_stop', '<=', period_to.date_stop),
+             ('special', '=', False)],
+            context=context)
+        periods = period_model.browse(cr, uid, period_ids, context=context)
+        return set([p.company_id.id for p in periods])
+
+    def _get_period_ids_for_mode(self, cr, uid, period_from, period_to, mode,
+                                 context=None):
+        assert not period_from.special
+        assert not period_to.special
+        assert period_from.company_id == period_to.company_id
+        assert period_from.date_start <= period_to.date_start
+        period_ids = []
+        for company_id in self._get_period_company_ids(cr, uid,
+                                                       period_from, period_to,
+                                                       context=context):
+            if mode == MODE_VARIATION:
+                period_ids.extend(self._get_period_ids_between(cr, uid,
+                    period_from, period_to, company_id, context=context))
+            else:
+                if mode == MODE_INITIAL:
+                    period_to = self._get_previous_normal_period(cr, uid,
+                        period_from, company_id, context=context)
+                # look for opening period with moves
+                opening_period = self._get_previous_opening_period(cr, uid,
+                    period_from, company_id, context=context)
+                if opening_period and \
+                        self._period_has_moves(cr, uid, opening_period,
+                                               context=context):
+                    # found opening period with moves
+                    if opening_period.date_start == period_from.date_start and \
+                            mode == MODE_INITIAL:
+                        # if the opening period has the same start date as
+                        # period_from, the we'll find the initial balance
+                        # in the initial period and that's it
+                        period_ids.append(opening_period.id)
+                        continue
+                    period_from = opening_period
+                else:
+                    # no opening period with moves,
+                    # use very first normal period
+                    period_from = self._get_first_normal_period(
+                        cr, uid, company_id, context=context)
+                if period_to:
+                    period_ids.extend(self._get_period_ids_between(
+                        cr, uid, period_from, period_to, company_id,
+                        context=context))
+        return period_ids
+
+    def get_aml_domain_for_periods(self, cr, uid, period_from, period_to, mode,
+                                   context=None):
+        period_ids = self._get_period_ids_for_mode(cr, uid,
+            period_from, period_to, mode, context=context)
+        return [('period_id', 'in', period_ids)]
 
     def do_queries(self, cr, uid, period_domain, period_domain_i,
                    period_domain_e, context=None):
@@ -240,7 +350,7 @@ class AccountingExpressionProcessor(object):
         This method must be executed after do_queries().
         """
         def f(mo):
-            field, mode, account_codes, domain = self._parse_mo(mo)
+            field, mode, account_codes, domain = self._parse_match_object(mo)
             key = (domain, mode)
             account_ids_data = self._data[key]
             v = 0.0
