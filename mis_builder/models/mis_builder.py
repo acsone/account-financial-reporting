@@ -36,9 +36,6 @@ from openerp.tools.safe_eval import safe_eval
 from openerp.tools.translate import _
 
 from .aep import AccountingExpressionProcessor
-from .aep import MODE_VARIATION
-from .aep import MODE_END
-from .aep import MODE_INITIAL
 
 
 class AutoStruct(object):
@@ -378,7 +375,6 @@ class mis_report_instance_period(orm.Model):
                 all_period_ids = period_obj.search(
                     cr, uid,
                     [('special', '=', False),
-                     '|', ('company_id', '=', False),
                      ('company_id', '=', c.company_id.id)],
                     order='date_start',
                     context=context)
@@ -387,7 +383,6 @@ class mis_report_instance_period(orm.Model):
                     [('special', '=', False),
                      ('date_start', '<=', d),
                      ('date_stop', '>=', d),
-                     '|', ('company_id', '=', False),
                      ('company_id', '=', c.company_id.id)],
                     context=context)
                 if not current_period_ids:
@@ -482,41 +477,18 @@ class mis_report_instance_period(orm.Model):
          'Period name should be unique by report'),
     ]
 
-    def drilldown(self, cr, uid, ids, expr, context=None):
-        if isinstance(ids, (int, long)):
-            ids = [ids]
-        this = self.browse(cr, uid, ids, context=context)[0]
+    def drilldown(self, cr, uid, _id, expr, context=None):
+        this = self.browse(cr, uid, _id, context=context)
         aep = AccountingExpressionProcessor(cr)
-        aep.parse_expr(expr)
-        aep.done_parsing(cr, uid,
-                         [('company_id', '=',
-                           this.report_instance_id.company_id.id)],
-                         context=context)
-        domain = aep.get_aml_domain_for_expr(expr)
-        if domain:
-            # TODO: reuse compute_period_domain
-            # compute date/period
-            period_ids = []
-            date_from = None
-            date_to = None
-            period_obj = self.pool['account.period']
-            target_move = this.report_instance_id.target_move
-            if target_move == 'posted':
-                domain.append(('move_id.state', '=', target_move))
-            if this.period_from:
-                compute_period_ids = period_obj.build_ctx_periods(
-                    cr, uid, this.period_from.id, this.period_to.id)
-                period_ids.extend(compute_period_ids)
-            else:
-                date_from = this.date_from
-                date_to = this.date_to
-            if period_ids:
-                if date_from:
-                    domain.append('|')
-                domain.append(('period_id', 'in', period_ids))
-            if date_from:
-                domain.extend([('date', '>=', date_from),
-                               ('date', '<=', date_to)])
+        if aep.has_account_var(expr):
+            aep.parse_expr(expr)
+            aep.done_parsing(cr, uid, this.report_instance_id.root_account,
+                             context=context)
+            domain = aep.get_aml_domain_for_expr(cr, uid,
+                expr, this.date_from, this.date_to,
+                this.period_from, this.period_to,
+                this.report_instance_id.target_move,
+                context=context)
             return {
                 'name': expr + ' - ' + this.name,
                 'domain': domain,
@@ -529,28 +501,6 @@ class mis_report_instance_period(orm.Model):
             }
         else:
             return False
-
-    def compute_period_domain(self, cr, uid, period_report, aep, mode,
-                              context=None):
-        domain = []
-        target_move = period_report.report_instance_id.target_move
-        if target_move == 'posted':
-            domain.append(('move_id.state', '=', target_move))
-        if not period_report.period_from.id or not period_report.period_to.id:
-            aml_domain = aep\
-                .get_aml_domain_for_periods(cr, uid, period_report.date_from,
-                                            period_report.date_to,
-                                            mode,
-                                            context=context)
-            domain.extend(aml_domain)
-        elif period_report.period_from.id and period_report.period_to.id:
-            aml_domain = aep\
-                .get_aml_domain_for_periods(cr, uid, period_report.period_from,
-                                            period_report.period_to,
-                                            mode,
-                                            context)
-            domain.extend(aml_domain)
-        return domain
 
     def _fetch_queries(self, cr, uid, c, context):
         res = {}
@@ -594,15 +544,13 @@ class mis_report_instance_period(orm.Model):
             'len': len,
             'avg': lambda l: sum(l) / float(len(l)),
         }
-        domain_p = self.compute_period_domain(cr, uid, c, aep, MODE_VARIATION,
-                                              context=context)
-        domain_e = self.compute_period_domain(cr, uid, c, aep, MODE_END,
-                                              context=context)
-        domain_i = self.compute_period_domain(cr, uid, c, aep, MODE_INITIAL,
-                                              context=context)
-        aep.do_queries(cr, uid, domain_p, domain_i, domain_e, context=context)
         localdict.update(self._fetch_queries(cr, uid, c,
                                              context=context))
+
+        aep.do_queries(cr, uid, c.date_from, c.date_to,
+                       c.period_from, c.period_to,
+                       c.report_instance_id.target_move,
+                       context=context)
 
         compute_queue = c.report_instance_id.report_id.kpi_ids
         recompute_queue = []
@@ -638,7 +586,7 @@ class mis_report_instance_period(orm.Model):
                     kpi_style = None
 
                 drilldown = (kpi_val is not None and
-                             bool(aep.get_aml_domain_for_expr(kpi.expression)))
+                             aep.has_account_var(kpi.expression))
 
                 res[kpi.name] = {
                     'val': kpi_val,
@@ -684,6 +632,19 @@ class mis_report_instance(orm.Model):
                                                       context=context)
         return res
 
+    def _get_root_account(self, cr, uid, ids, field_name, arg, context=None):
+        res = {}
+        account_obj = self.pool['account.account']
+        for r in self.browse(cr, uid, ids, context=context):
+            account_ids = account_obj.search(
+                cr, uid,
+                [('parent_id', '=', False),
+                 ('company_id', '=', r.company_id.id)],
+                context=context)
+            if len(account_ids) == 1:
+                res[r.id] = account_ids[0]
+        return res
+
     _name = 'mis.report.instance'
 
     _columns = {
@@ -708,6 +669,9 @@ class mis_report_instance(orm.Model):
                                          ('all', 'All Entries'),
                                          ], 'Target Moves', required=True),
         'company_id': fields.many2one('res.company', 'Company', required=True),
+        'root_account': fields.function(_get_root_account,
+                                        type='many2one', obj='account.account',
+                                        string="Account chart"),
     }
 
     _defaults = {
@@ -758,13 +722,11 @@ class mis_report_instance(orm.Model):
             tools.DEFAULT_SERVER_DATE_FORMAT),
             tformat)
 
-    def compute(self, cr, uid, _ids, context=None):
-        assert isinstance(_ids, (int, long))
+    def compute(self, cr, uid, _id, context=None):
+        assert isinstance(_id, (int, long))
         if context is None:
             context = {}
-        r = self.browse(cr, uid, _ids, context=context)
-        context['state'] = r.target_move
-
+        r = self.browse(cr, uid, _id, context=context)
         content = OrderedDict()
         # empty line name for header
         header = OrderedDict()
@@ -776,8 +738,7 @@ class mis_report_instance(orm.Model):
             content[kpi.name] = {'kpi_name': kpi.description,
                                  'cols': [],
                                  'default_style': ''}
-        aep.done_parsing(cr, uid, [('company_id', '=', r.company_id.id)],
-                         context=context)
+        aep.done_parsing(cr, uid, r.root_account, context=context)
         report_instance_period_obj = self.pool.get(
             'mis.report.instance.period')
         kpi_obj = self.pool.get('mis.report.kpi')

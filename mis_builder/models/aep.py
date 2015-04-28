@@ -63,10 +63,9 @@ class AccountingExpressionProcessor(object):
         # before done_parsing: {(domain, mode): set(account_codes)}
         # after done_parsing: {(domain, mode): set(account_ids)}
         self._map_account_ids = defaultdict(set)
-        self._set_all_accounts = set()  # set((domain, mode))
         self._account_ids_by_code = defaultdict(set)
 
-    def _load_account_codes(self, cr, uid, account_codes, account_domain,
+    def _load_account_codes(self, cr, uid, account_codes, root_account,
                             context=None):
         account_obj = self.pool['account.account']
         exact_codes = set()
@@ -74,27 +73,39 @@ class AccountingExpressionProcessor(object):
         for account_code in account_codes:
             if account_code in self._account_ids_by_code:
                 continue
-            if '%' in account_code:
+            if account_code is None:
+                # by convention the root account is keyed as
+                # None in _account_ids_by_code, so it is consistent
+                # with what _parse_match_object returns for an
+                # empty list of account codes, ie [None]
+                exact_codes.add(root_account.code)
+            elif '%' in account_code:
                 like_codes.add(account_code)
             else:
                 exact_codes.add(account_code)
         for account_id in account_obj.\
                 search(cr, uid,
-                       [('code', 'in', list(exact_codes))] + account_domain,
+                       [('code', 'in', list(exact_codes)),
+                        ('parent_id', 'child_of', root_account.id)],
                        context=context):
             account = account_obj.browse(cr, uid, account_id, context=context)
+            if account.code == root_account.code:
+                code = None
+            else:
+                code = account.code
             if account.type in ('view', 'consolidation'):
-                self._account_ids_by_code[account.code].update(
+                self._account_ids_by_code[code].update(
                     account_obj._get_children_and_consol(
                         cr, uid,
                         [account.id],
                         context=context))
             else:
-                self._account_ids_by_code[account.code].add(account.id)
+                self._account_ids_by_code[code].add(account.id)
         for like_code in like_codes:
             for account_id in account_obj.\
                     search(cr, uid,
-                           [('code', 'like', like_code)] + account_domain,
+                           [('code', 'like', like_code),
+                            ('parent_id', 'child_of', root_account.id)],
                            context=context):
                 account = account_obj.browse(cr, uid, account_id,
                                              context=context)
@@ -124,7 +135,7 @@ class AccountingExpressionProcessor(object):
         if account_codes.strip():
             account_codes = [a.strip() for a in account_codes.split(',')]
         else:
-            account_codes = None
+            account_codes = [None]
         domain = domain or '[]'
         domain = tuple(safe_eval(domain))
         return field, mode, account_codes, domain
@@ -138,62 +149,65 @@ class AccountingExpressionProcessor(object):
         for mo in self.ACC_RE.finditer(expr):
             _, mode, account_codes, domain = self._parse_match_object(mo)
             key = (domain, mode)
-            if account_codes:
-                self._map_account_ids[key].update(account_codes)
-            else:
-                self._set_all_accounts.add(key)
+            self._map_account_ids[key].update(account_codes)
 
-    def done_parsing(self, cr, uid, account_domain, context=None):
+    def done_parsing(self, cr, uid, root_account, context=None):
         # load account codes and replace account codes by account ids in _map
         for key, account_codes in self._map_account_ids.items():
-            self._load_account_codes(cr, uid, account_codes, account_domain,
+            self._load_account_codes(cr, uid, account_codes, root_account,
                                      context=context)
             account_ids = set()
             for account_code in account_codes:
                 account_ids.update(self._account_ids_by_code[account_code])
             self._map_account_ids[key] = list(account_ids)
 
-    def get_aml_domain_for_expr(self, expr):
-        """ Get a domain on account.move.line for an expression.
+    def has_account_var(self, expr):
+        return bool(self.ACC_RE.match(expr))
 
-        Only accounting expression in mode 'p' and 'e' are considered.
+    def get_aml_domain_for_expr(self, cr, uid, expr,
+                                date_from, date_to,
+                                period_from, period_to,
+                                target_move,
+                                context=None):
+        """ Get a domain on account.move.line for an expression.
 
         Prerequisite: done_parsing() must have been invoked.
 
         Returns a domain that can be used to search on account.move.line.
+        To be meaningful, this domain must be extended with a domain
+        obtained from get_aml_domain_for_dates()
         """
         aml_domains = []
+        domain_by_mode = {}
         for mo in self.ACC_RE.finditer(expr):
             field, mode, account_codes, domain = self._parse_match_object(mo)
-            if mode == MODE_INITIAL:
-                continue
             aml_domain = list(domain)
-            if account_codes:
-                account_ids = set()
-                for account_code in account_codes:
-                    account_ids.update(self._account_ids_by_code[account_code])
-                aml_domain.append(('account_id', 'in', tuple(account_ids)))
+            account_ids = set()
+            for account_code in account_codes:
+                account_ids.update(self._account_ids_by_code[account_code])
+            aml_domain.append(('account_id', 'in', tuple(account_ids)))
             if field == 'crd':
                 aml_domain.append(('credit', '>', 0))
             elif field == 'deb':
                 aml_domain.append(('debit', '>', 0))
             aml_domains.append(expression.normalize_domain(aml_domain))
-        return expression.OR(aml_domains)
+            if mode not in domain_by_mode:
+                domain_by_mode[mode] = \
+                    self.get_aml_domain_for_dates(cr, uid, date_from, date_to,
+                                                  period_from, period_to,
+                                                  mode, target_move,
+                                                  context=context)
+        return expression.OR(aml_domains) + \
+            expression.OR(domain_by_mode.values())
 
-    def get_aml_domain_for_dates(self, date_start, date_end, mode):
-        if mode != MODE_VARIATION:
-            raise RuntimeError("")  # TODO
-        return [('date', '>=', date_start), ('date', '<=', date_end)]
+    def _period_has_moves(self, period):
+        move_model = self.env['account.move']
+        return bool(move_model.search([('period_id', '=', period.id)],
+                                      limit=1))
 
-    def _period_has_moves(self, cr, uid, period, context=None):
-        move_model = self.pool['account.move']
-        return bool(move_model.search(cr, uid, [('period_id', '=', period.id)],
-                                      limit=1, context=context))
-
-    def _get_previous_opening_period(self, cr, uid, period, company_id,
-                                     context=None):
-        period_model = self.pool['account.period']
-        period_ids = period_model.search(cr, uid,
+    def _get_previous_opening_period(self, cr, uid, period, company_id, context=None):
+        period_model = self.env['account.period']
+        period_ids = period_model.search(
             [('date_start', '<=', period.date_start),
              ('special', '=', True),
              ('company_id', '=', company_id)],
@@ -277,7 +291,7 @@ class AccountingExpressionProcessor(object):
                     if opening_period.date_start == period_from.date_start and \
                             mode == MODE_INITIAL:
                         # if the opening period has the same start date as
-                        # period_from, the we'll find the initial balance
+                        # period_from, then we'll find the initial balance
                         # in the initial period and that's it
                         period_ids.append(opening_period.id)
                         continue
@@ -293,29 +307,38 @@ class AccountingExpressionProcessor(object):
                         context=context))
         return period_ids
 
-    def get_aml_domain_for_periods(self, cr, uid, period_from, period_to, mode,
-                                   context=None):
-        period_ids = self._get_period_ids_for_mode(cr, uid,
-            period_from, period_to, mode, context=context)
-        return [('period_id', 'in', period_ids)]
+    def get_aml_domain_for_dates(self, cr, uid, date_from, date_to,
+                                 period_from, period_to,
+                                 mode,
+                                 target_move,
+                                 context=None):
+        if period_from and period_to:
+            period_ids = self._get_period_ids_for_mode(cr, uid,
+                period_from, period_to, mode, context=context)
+            domain = [('period_id', 'in', period_ids)]
+        else:
+            domain = [('date', '>=', date_from), ('date', '<=', date_to)]
+        if target_move == 'posted':
+            domain.append(('move_id.state', '=', 'posted'))
+        return expression.normalize_domain(domain)
 
-    def do_queries(self, cr, uid, period_domain, period_domain_i,
-                   period_domain_e, context=None):
+    def do_queries(self, cr, uid, date_from, date_to, period_from, period_to,
+                   target_move, context=None):
         aml_model = self.pool['account.move.line']
         # {(domain, mode): {account_id: (debit, credit)}}
         self._data = defaultdict(dict)
-        # fetch sum of debit/credit, grouped by account_id
+        domain_by_mode = {}
         for key in self._map_account_ids:
             domain, mode = key
-            if mode == MODE_VARIATION:
-                domain = list(domain) + period_domain
-            elif mode == MODE_INITIAL:
-                domain = list(domain) + period_domain_i
-            elif mode == MODE_END:
-                domain = list(domain) + period_domain_e
-            else:
-                raise RuntimeError("unexpected mode %s" % (mode,))
+            if mode not in domain_by_mode:
+                domain_by_mode[mode] = \
+                    self.get_aml_domain_for_dates(cr, uid, date_from, date_to,
+                                                  period_from, period_to,
+                                                  mode, target_move,
+                                                  context=context)
+            domain = list(domain) + domain_by_mode[mode]
             domain.append(('account_id', 'in', self._map_account_ids[key]))
+            # fetch sum of debit/credit, grouped by account_id
             accs = aml_model.read_group(cr, uid, domain,
                                         ['debit', 'credit', 'account_id'],
                                         ['account_id'],
@@ -323,24 +346,6 @@ class AccountingExpressionProcessor(object):
             for acc in accs:
                 self._data[key][acc['account_id'][0]] = \
                     (acc['debit'] or 0.0, acc['credit'] or 0.0)
-        # fetch sum of debit/credit for expressions with no account
-        for key in self._set_all_accounts:
-            domain, mode = key
-            if mode == MODE_VARIATION:
-                domain = list(domain) + period_domain
-            elif mode == MODE_INITIAL:
-                domain = list(domain) + period_domain_i
-            elif mode == MODE_END:
-                domain = list(domain) + period_domain_e
-            else:
-                raise RuntimeError("unexpected mode %s" % (mode,))
-            accs = aml_model.read_group(cr, uid, domain,
-                                        ['debit', 'credit'],
-                                        [],
-                                        context=context)
-            assert len(accs) == 1
-            self._data[key][None] = \
-                (accs[0]['debit'] or 0.0, accs[0]['credit'] or 0.0)
 
     def replace_expr(self, expr):
         """Replace accounting variables in an expression by their amount.
@@ -354,11 +359,8 @@ class AccountingExpressionProcessor(object):
             key = (domain, mode)
             account_ids_data = self._data[key]
             v = 0.0
-            for account_code in account_codes or [None]:
-                if account_code:
-                    account_ids = self._account_ids_by_code[account_code]
-                else:
-                    account_ids = [None]
+            for account_code in account_codes:
+                account_ids = self._account_ids_by_code[account_code]
                 for account_id in account_ids:
                     debit, credit = \
                         account_ids_data.get(account_id, (0.0, 0.0))
