@@ -1,0 +1,4 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_account_financial_report_invoice,account.financial.report.prefix invoice,model_account_financial_report_prefix,account.group_account_invoice,1,0,0,0
+access_account_financial_report_user,account.financial.report.prefix user,model_account_financial_report_prefix,account.group_account_user,1,0,0,0
+access_account_financial_report_manager,account.financial.report.prefix manager,model_account_financial_report_prefix,account.group_account_manager,1,1,1,1

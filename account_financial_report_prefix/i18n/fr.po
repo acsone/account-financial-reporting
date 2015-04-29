@@ -1,0 +1,80 @@
+# Translation of Odoo Server.
+# This file contains the translation of the following modules:
+#	* account_financial_report_prefix
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: Odoo Server 8.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2015-04-28 17:15+0000\n"
+"PO-Revision-Date: 2015-04-28 17:15+0000\n"
+"Last-Translator: <>\n"
+"Language-Team: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: \n"
+"Plural-Forms: \n"
+
+#. module: account_financial_report_prefix
+#: field:account.financial.report.prefix,name:0
+msgid "Account Code Prefix"
+msgstr "Préfixe de code de compte"
+
+#. module: account_financial_report_prefix
+#: view:account.financial.report.prefix:account_financial_report_prefix.account_financial_report_prefix_form_view
+#: model:ir.model,name:account_financial_report_prefix.model_account_financial_report_prefix
+msgid "Account Financial Report Code Prefix"
+msgstr "Préfixe de code de rapport financier comptable"
+
+#. module: account_financial_report_prefix
+#: view:account.financial.report.prefix:account_financial_report_prefix.account_financial_report_prefix_search_view
+#: view:account.financial.report.prefix:account_financial_report_prefix.account_financial_report_prefix_tree_view
+msgid "Account Financial Report Code Prefixes"
+msgstr "Préfixes de code de rapport financier comptable"
+
+#. module: account_financial_report_prefix
+#: field:account.financial.report.prefix,create_uid:0
+msgid "Created by"
+msgstr "Créé par"
+
+#. module: account_financial_report_prefix
+#: field:account.financial.report.prefix,create_date:0
+msgid "Created on"
+msgstr "Créé le"
+
+#. module: account_financial_report_prefix
+#: model:ir.actions.act_window,name:account_financial_report_prefix.account_financial_report_prefix_action
+#: model:ir.ui.menu,name:account_financial_report_prefix.account_financial_report_prefix_menu
+msgid "Financial Reports Prefixes"
+msgstr "Préfixes des rapports financiers"
+
+#. module: account_financial_report_prefix
+#: field:account.financial.report.prefix,id:0
+msgid "ID"
+msgstr ""
+
+#. module: account_financial_report_prefix
+#: field:account.financial.report.prefix,write_uid:0
+msgid "Last Updated by"
+msgstr "Dernière modification par"
+
+#. module: account_financial_report_prefix
+#: field:account.financial.report.prefix,write_date:0
+msgid "Last Updated on"
+msgstr "Dernière mise à jour le"
+
+#. module: account_financial_report_prefix
+#: field:account.financial.report,account_prefix_ids:0
+msgid "Prefixes"
+msgstr "Préfixes"
+
+#. module: account_financial_report_prefix
+#: help:account.financial.report,account_prefix_ids:0
+msgid "Set of account codes prefixes on which the financial report is based"
+msgstr "Ensemble des préfixes de codes de compte sur lesquels le rapport fincier est construit"
+
+#. module: account_financial_report_prefix
+#: sql_constraint:account.financial.report.prefix:0
+msgid "The Account Code Prefix must be unique !"
+msgstr "Le préfixe de code de compte doit être unique !"
+
