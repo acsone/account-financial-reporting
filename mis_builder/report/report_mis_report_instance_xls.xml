@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openerp>
+  <data>
+
+    <template id="report_mis_report_instance_xls">
+      <html>
+        <thead>
+          <meta http-equiv="content-type" content="text/html; charset=utf-8"/>
+        </thead>
+        <tbody>
+          <t t-foreach="docs" t-as="o">
+            <div>
+              <h2 t-field="o.name"></h2>
+              <table>
+                <thead>
+                  <tr>
+                    <t t-foreach="docs_computed[o.id]['header']" t-as="h">
+                      <th>
+                          <t t-esc="h_value['kpi_name']"/>
+                      </th>
+                      <th t-foreach="h_value['cols']" t-as="col">
+                          <t t-esc="col['name']"/>
+                          <br/>
+                          <t t-esc="col['date']"/>
+                      </th>
+                    </t>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr t-foreach="docs_computed[o.id]['content']" t-as="c">
+                    <td t-att-style="c_value['default_style']">
+                        <t t-esc="c_value['kpi_name']"/>
+                    </td>
+                    <t t-foreach="c_value['cols']" t-as="value">
+                      <td t-att-style="value_value.get('style')">
+                        <t t-esc="value_value['val_r']"/>
+                      </td>
+                    </t>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </t>
+        </tbody>
+      </html>
+    </template>
+
+  </data>
+</openerp>

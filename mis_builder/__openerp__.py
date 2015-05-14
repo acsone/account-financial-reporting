@@ -39,6 +39,7 @@
         'views/mis_builder.xml',
         'security/ir.model.access.csv',
         'security/mis_builder_security.xml',
+        'report/report_mis_report_instance_xls.xml',
     ],
     'test': [
     ],

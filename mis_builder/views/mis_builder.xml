@@ -108,6 +108,19 @@
 	      <field name="auto" eval="False"/>
 	    </record>
 
+        <record id="qweb_xls_export" model="ir.actions.report.xml">
+          <field name="name">MIS report instance QWEB XLS report</field>
+          <field name="model">mis.report.instance</field>
+          <field name="type">ir.actions.report.xml</field>
+          <field name="report_name">mis_builder.report_mis_report_instance_xls</field>
+          <field name="report_type">controller</field>
+          <field name="report_file">/mis_builder/export/xls</field>
+          <!-- 
+          <field name="report_type">qweb-html</field>
+           -->
+          <field name="auto" eval="False"/>
+        </record>
+
         <record model="ir.ui.view" id="mis_report_instance_result_view_form">
             <field name="name">mis.report.instance.result.view.form</field>
             <field name="model">mis.report.instance</field>
@@ -152,6 +165,7 @@
                     </div>
                     <div class="oe_right oe_button_box" name="buttons"> 
                         <button type="object" name="preview" string="Preview" icon="gtk-print-preview" />
+                        <button type="action" name="%(qweb_xls_export)d" string="New XLS Export" icon="gtk-execute" />
                         <button type="action" name="%(xls_export)d" string="XLS Export" icon="gtk-execute" />
                         <button type="action" name="%(mis_report_instance_add_to_dashboard_action)d" string="Add to dashboard" icon="gtk-add" />
                     </div>
