@@ -316,7 +316,7 @@ class CommonReportHeaderWebkit(common_report_header):
                 past_limit = [
                     ('date_start', '>=', opening_period_br.date_stop)]
 
-        periods_search = [('date_stop', '<=', start_period.date_stop)]
+        periods_search = [('date_stop', '<', start_period.date_start)]
         periods_search += past_limit
 
         if not include_opening:
