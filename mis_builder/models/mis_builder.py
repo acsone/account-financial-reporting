@@ -76,7 +76,7 @@ class MisReportKpi(models.Model):
     In addition to a name and description, it has an expression
     to compute it based on queries defined in the MIS report.
     It also has various informations defining how to render it
-    (numeric or percentage or a string, a suffix, divider) and
+    (numeric or percentage or a string, a prefix, a suffix, divider) and
     how to render comparison of two values of the KPI.
     KPI's have a sequence and are ordered inside the MIS report.
     """
@@ -107,6 +107,7 @@ class MisReportKpi(models.Model):
                                default='1')
     dp = fields.Integer(string='Rounding', default=0)
     suffix = fields.Char(size=16, string='Suffix')
+    prefix = fields.Char(size=16, string='Prefix')
     compare_method = fields.Selection([('diff', _('Difference')),
                                        ('pct', _('Percentage')),
                                        ('none', _('None'))],
@@ -163,10 +164,10 @@ class MisReportKpi(models.Model):
             return '#N/A'
         elif self.type == 'num':
             return self._render_num(lang_id, value, self.divider,
-                                    self.dp, self.suffix)
+                                    self.dp, self.prefix, self.suffix)
         elif self.type == 'pct':
             return self._render_num(lang_id, value, 0.01,
-                                    self.dp, '%')
+                                    self.dp, '', '%',)
         else:
             return unicode(value)
 
@@ -180,7 +181,7 @@ class MisReportKpi(models.Model):
             return self._render_num(
                 lang_id,
                 value - base_value,
-                0.01, self.dp, _('pp'), sign='+')
+                0.01, self.dp, '', _('pp'), sign='+')
         elif self.type == 'num':
             if average_value:
                 value = value / float(average_value)
@@ -190,17 +191,17 @@ class MisReportKpi(models.Model):
                 return self._render_num(
                     lang_id,
                     value - base_value,
-                    self.divider, self.dp, self.suffix, sign='+')
+                    self.divider, self.dp, self.prefix, self.suffix, sign='+')
             elif self.compare_method == 'pct':
                 if round(base_value, self.dp) != 0:
                     return self._render_num(
                         lang_id,
                         (value - base_value) / abs(base_value),
-                        0.01, self.dp, '%', sign='+')
+                        0.01, self.dp, '', '%', sign='+')
         return ''
 
     def _render_num(self, lang_id, value, divider,
-                    dp, suffix, sign='-'):
+                    dp, prefix, suffix, sign='-'):
         divider_label = _get_selection_label(
             self._columns['divider'].selection, divider)
         if divider_label == '1':
@@ -211,8 +212,11 @@ class MisReportKpi(models.Model):
             '%%%s.%df' % (sign, dp),
             value,
             grouping=True)
-        value = u'%s\N{NO-BREAK SPACE}%s%s' % \
-            (value, divider_label, suffix or '')
+        space = ''
+        if value:
+            space = u'\N{NO-BREAK SPACE}'
+        value = u'%s%s%s%s%s' % \
+            (prefix or '', value, space, divider_label, suffix or '')
         value = value.replace('-', u'\N{NON-BREAKING HYPHEN}')
         return value
 
@@ -536,6 +540,7 @@ class MisReportInstancePeriod(models.Model):
                     'val_r': kpi_val_rendered,
                     'val_c': kpi_val_comment,
                     'style': kpi_style,
+                    'prefix': kpi.prefix,
                     'suffix': kpi.suffix,
                     'dp': kpi.dp,
                     'is_percentage': kpi.type == 'pct',
