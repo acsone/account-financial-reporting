@@ -1,4 +1,4 @@
-# -*- encoding: utf-8 -*-
+# -*- coding: utf-8 -*-
 ##############################################################################
 #
 #    mis_builder module for Odoo, Management Information System Builder
@@ -29,10 +29,10 @@ import logging
 _logger = logging.getLogger(__name__)
 
 
-class mis_builder_xls_parser(report_sxw.rml_parse):
+class MisBuilderXlsParser(report_sxw.rml_parse):
 
     def __init__(self, cr, uid, name, context):
-        super(mis_builder_xls_parser, self).__init__(
+        super(MisBuilderXlsParser, self).__init__(
             cr, uid, name, context=context)
         self.context = context
 
@@ -135,4 +135,4 @@ class mis_builder_xls(report_xls):
 
 mis_builder_xls('report.mis.report.instance.xls',
                 'mis.report.instance',
-                parser=mis_builder_xls_parser)
+                parser=MisBuilderXlsParser)
