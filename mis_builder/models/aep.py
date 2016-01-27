@@ -25,7 +25,7 @@
 import re
 from collections import defaultdict
 
-from openerp.exceptions import Warning
+from openerp.exceptions import Warning as UserError
 from openerp.osv import expression
 from openerp.tools.safe_eval import safe_eval
 from openerp.tools.translate import _
@@ -321,7 +321,7 @@ class AccountingExpressionProcessor(object):
             if mode == MODE_VARIATION:
                 domain = [('date', '>=', date_from), ('date', '<=', date_to)]
             else:
-                raise Warning(_("Modes i and e are only applicable for "
+                raise UserError(_("Modes i and e are only applicable for "
                                 "fiscal periods"))
         if target_move == 'posted':
             domain.append(('move_id.state', '=', 'posted'))

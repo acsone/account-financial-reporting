@@ -37,11 +37,11 @@ class MisBuilderXlsParser(report_sxw.rml_parse):
         self.context = context
 
 
-class mis_builder_xls(report_xls):
+class MisBuilderXls(report_xls):
 
     def __init__(self, name, table, rml=False, parser=False, header=True,
                  store=False):
-        super(mis_builder_xls, self).__init__(
+        super(MisBuilderXls, self).__init__(
             name, table, rml, parser, header, store)
 
         # Cell Styles
@@ -133,6 +133,6 @@ class mis_builder_xls(report_xls):
             row_pos += 1
 
 
-mis_builder_xls('report.mis.report.instance.xls',
-                'mis.report.instance',
-                parser=MisBuilderXlsParser)
+MisBuilderXls('report.mis.report.instance.xls',
+              'mis.report.instance',
+              parser=MisBuilderXlsParser)

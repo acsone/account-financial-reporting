@@ -32,6 +32,7 @@
     'author': 'ACSONE SA/NV,'
               'Odoo Community Association (OCA)',
     'website': 'http://acsone.eu',
+    "images": [],
     'depends': [
         'account',
         'report_xls',  # OCA/reporting-engine
