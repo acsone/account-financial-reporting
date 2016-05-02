@@ -1,4 +1,4 @@
 # list the OCA project dependencies, one per line
 # add a github url if you need a forked version
 reporting-engine
-server-tools https://github.com/oca-sorrento/server-tools 9.0-add_date_range_sorento
+server-tools

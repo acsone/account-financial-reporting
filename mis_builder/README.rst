@@ -71,8 +71,6 @@ Known issues / Roadmap
   * for multi-company consolidation, must we replace the consolidation chart
     of account by a list of companies?
 
-* Add 'Fiscal Year' period type.
-
 * Allow selecting accounts by type. This is currently possible by expressing
   a query such as balp[][('account_id.user_type.code', '=', ...)]. This will work
   but would be more efficient if one could write balp[user_type=...], as it would
@@ -108,6 +106,8 @@ Contributors
 * Stéphane Bidoul <stephane.bidoul@acsone.eu>
 * Laetitia Gangloff <laetitia.gangloff@acsone.eu>
 * Adrien Peiffer <adrien.peiffer@acsone.eu>
+* Giovanni Capalbo <giovanni@therp.nl>
+* Sébastien Beau <sebastien.beau@akretion.com>
 
 Maintainer
 ----------

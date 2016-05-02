@@ -2,6 +2,7 @@
 # © 2014-2015 ACSONE SA/NV (<http://acsone.eu>)
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl.html).
 
+from collections import defaultdict, OrderedDict
 import datetime
 import dateutil
 import logging
@@ -17,8 +18,17 @@ from openerp.tools.safe_eval import safe_eval
 from .aep import AccountingExpressionProcessor as AEP
 from .aggregate import _sum, _avg, _min, _max
 from .accounting_none import AccountingNone
+from openerp.exceptions import UserError
+from .simple_array import SimpleArray
 
 _logger = logging.getLogger(__name__)
+
+
+class DataError(Exception):
+
+    def __init__(self, name, msg):
+        self.name = name
+        self.msg = msg
 
 
 class AutoStruct(object):
@@ -26,6 +36,115 @@ class AutoStruct(object):
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
             setattr(self, k, v)
+
+
+class KpiMatrix(object):
+    """ This object holds the computation results in a way
+    that can be browsed easily for rendering """
+
+    def __init__(self):
+        # { period: {kpi: vals}
+        self._kpi_vals = defaultdict(dict)
+        # { period: {kpi: {account_id: vals}}}
+        self._kpi_exploded_vals = defaultdict(dict)
+        # { period: localdict }
+        self._localdict = {}
+        # { kpi: set(account_ids) }
+        self._kpis = OrderedDict()
+        # { account_id: account name }
+        self._account_names_by_id = {}
+
+    def set_kpi_vals(self, period, kpi, vals):
+        """ Set the values for a kpi in a period
+
+        vals is a list of sub-kpi values.
+        """
+        self._kpi_vals[period][kpi] = vals
+        if kpi not in self._kpis:
+            self._kpis[kpi] = set()
+
+    def set_kpi_exploded_vals(self, period, kpi, account_id, vals):
+        """ Set the detail values for a kpi in a period for a GL account
+
+        This is used by the automatic details mechanism.
+
+        vals is a list of sub-kpi values.
+        """
+        exploded_vals = self._kpi_exploded_vals[period]
+        if kpi not in exploded_vals:
+            exploded_vals[kpi] = {}
+        exploded_vals[kpi][account_id] = vals
+        self._kpis[kpi].add(account_id)
+
+    def set_localdict(self, period, localdict):
+        # TODO FIXME to be removed when we have styles
+        self._localdict[period] = localdict
+
+    def get_localdict(self, period):
+        # TODO FIXME to be removed when we have styles
+        return self._localdict[period]
+
+    def iter_kpi_vals(self, period):
+        """ Iterate kpi values, including auto-expanded details by account
+
+        It yields, in no specific order:
+            * kpi technical name
+            * kpi object
+            * subkpi values tuple
+        """
+        for kpi, vals in self._kpi_vals[period].iteritems():
+            yield kpi.name, kpi, vals
+            kpi_exploded_vals = self._kpi_exploded_vals[period]
+            if kpi not in kpi_exploded_vals:
+                continue
+            for account_id, account_id_vals in \
+                    kpi_exploded_vals[kpi].iteritems():
+                yield "%s:%s" % (kpi.name, account_id), kpi, account_id_vals
+
+    def iter_kpis(self):
+        """ Iterate kpis, including auto-expanded details by accounts
+
+        It yields, in display order:
+            * kpi technical name
+            * kpi display name
+            * kpi object
+        """
+        for kpi, account_ids in self._kpis.iteritems():
+            yield kpi.name, kpi.description, kpi
+            for account_id in sorted(account_ids, key=self.get_account_name):
+                yield "%s:%s" % (kpi.name, account_id), \
+                    self.get_account_name(account_id), kpi
+
+    def get_exploded_account_ids(self):
+        """ Get the list of auto-expanded account ids
+
+        It returns the complete list, across all periods and kpis.
+        This method must be called after setting all kpi values
+        using set_kpi_vals and set_exploded_kpi_vals.
+        """
+        res = set()
+        for kpi, account_ids in self._kpis.iteritems():
+            res.update(account_ids)
+        return list(res)
+
+    def load_account_names(self, account_obj):
+        """ Load account names for all exploded account ids
+
+        This method must be called after setting all kpi values
+        using set_kpi_vals and set_exploded_kpi_vals, and before
+        calling get_account_name().
+        """
+        account_data = account_obj.browse(self.get_exploded_account_ids())
+        self._account_names_by_id = {a.id: u"{} {}".format(a.code, a.name)
+                                     for a in account_data}
+
+    def get_account_name(self, account_id):
+        """ Get account display name from it's id
+
+        This method must be called after loading account names with
+        load_account_names().
+        """
+        return self._account_names_by_id.get(account_id, account_id)
 
 
 def _get_selection_label(selection, value):
@@ -69,10 +188,20 @@ class MisReportKpi(models.Model):
     description = fields.Char(required=True,
                               string='Description',
                               translate=True)
-    expression = fields.Char(required=True,
-                             string='Expression')
-    default_css_style = fields.Char(string='Default CSS style')
-    css_style = fields.Char(string='CSS style expression')
+    multi = fields.Boolean()
+    expression = fields.Char(
+        compute='_compute_expression',
+        inverse='_inverse_expression')
+    expression_ids = fields.One2many('mis.report.kpi.expression', 'kpi_id')
+    auto_expand_accounts = fields.Boolean(string='Display details by account')
+    style = fields.Many2one(
+        string="Default style for KPI",
+        comodel_name="mis.report.kpi.style",
+        required=False
+    )
+    style_expression = fields.Char(
+        string='Style expression',
+        help='An expression that returns a style name for the kpi style')
     type = fields.Selection([('num', _('Numeric')),
                              ('pct', _('Percentage')),
                              ('str', _('String'))],
@@ -118,6 +247,54 @@ class MisReportKpi(models.Model):
                     'message': 'The name must be a valid python identifier'
                 }
             }
+
+    @api.multi
+    def _compute_expression(self):
+        for kpi in self:
+            l = []
+            for expression in kpi.expression_ids:
+                if expression.subkpi_id:
+                    l.append('{}={}'.format(
+                        expression.subkpi_id.name, expression.name))
+                else:
+                    l.append(
+                        expression.name)
+            kpi.expression = ',\n'.join(l)
+
+    @api.multi
+    def _inverse_expression(self):
+        for kpi in self:
+            if kpi.multi:
+                raise UserError('Can not update a multi kpi from the kpi line')
+            if kpi.expression_ids:
+                kpi.expression_ids[0].write({
+                    'name': kpi.expression,
+                    'subkpi_id': None})
+                for expression in kpi.expression_ids[1:]:
+                    expression.unlink()
+            else:
+                kpi.write({
+                    'expression_ids': [(0, 0, {
+                        'name': kpi.expression
+                        })]
+                    })
+
+    @api.onchange('multi')
+    def _onchange_multi(self):
+        for kpi in self:
+            if not kpi.multi:
+                if kpi.expression_ids:
+                    kpi.expression = kpi.expression_ids[0].name
+                else:
+                    kpi.expression = None
+            else:
+                expressions = []
+                for subkpi in kpi.report_id.subkpi_ids:
+                    expressions.append((0, 0, {
+                        'name': kpi.expression,
+                        'subkpi_id': subkpi.id,
+                        }))
+                kpi.expression_ids = expressions
 
     @api.onchange('description')
     def _onchange_description(self):
@@ -215,6 +392,68 @@ class MisReportKpi(models.Model):
         return value
 
 
+class MisReportSubkpi(models.Model):
+    _name = 'mis.report.subkpi'
+    _order = 'sequence'
+
+    sequence = fields.Integer()
+    report_id = fields.Many2one('mis.report')
+    name = fields.Char(size=32, required=True,
+                       string='Name')
+    description = fields.Char(required=True,
+                              string='Description',
+                              translate=True)
+    expression_ids = fields.One2many('mis.report.kpi.expression', 'subkpi_id')
+
+    @api.one
+    @api.constrains('name')
+    def _check_name(self):
+        if not _is_valid_python_var(self.name):
+            raise exceptions.Warning(_('The name must be a valid '
+                                       'python identifier'))
+
+    @api.onchange('name')
+    def _onchange_name(self):
+        if self.name and not _is_valid_python_var(self.name):
+            return {
+                'warning': {
+                    'title': 'Invalid name %s' % self.name,
+                    'message': 'The name must be a valid python identifier'
+                }
+            }
+
+    @api.onchange('description')
+    def _onchange_description(self):
+        """ construct name from description """
+        if self.description and not self.name:
+            self.name = _python_var(self.description)
+
+    @api.multi
+    def unlink(self):
+        for subkpi in self:
+            subkpi.expression_ids.unlink()
+        return super(MisReportSubkpi, self).unlink()
+
+
+class MisReportKpiExpression(models.Model):
+    """ A KPI Expression is an expression of a line of a MIS report Kpi.
+    It's used to compute the kpi value.
+    """
+
+    _name = 'mis.report.kpi.expression'
+    _order = 'sequence, name'
+
+    sequence = fields.Integer(
+        related='subkpi_id.sequence',
+        store=True,
+        readonly=True)
+    name = fields.Char(string='Expression')
+    kpi_id = fields.Many2one('mis.report.kpi')
+    subkpi_id = fields.Many2one(
+        'mis.report.subkpi',
+        readonly=True)
+
+
 class MisReportQuery(models.Model):
     """ A query to fetch arbitrary data for a MIS report.
 
@@ -287,6 +526,27 @@ class MisReport(models.Model):
     kpi_ids = fields.One2many('mis.report.kpi', 'report_id',
                               string='KPI\'s',
                               copy=True)
+    subkpi_ids = fields.One2many(
+        'mis.report.subkpi',
+        'report_id',
+        string="Sub KPI")
+
+    @api.multi
+    def get_wizard_report_action(self):
+        action = self.env.ref('mis_builder.mis_report_instance_view_action')
+        res = action.read()[0]
+        view = self.env.ref('mis_builder.wizard_mis_report_instance_view_form')
+        res.update({
+            'view_id': view.id,
+            'views': [(view.id, 'form')],
+            'target': 'new',
+            'context': {
+                'default_report_id': self.id,
+                'default_name': self.name,
+                'default_temporary': True,
+                }
+            })
+        return res
 
     @api.one
     def copy(self, default=None):
@@ -363,36 +623,25 @@ class MisReport(models.Model):
         return res
 
     @api.multi
-    def _compute(self, lang_id, aep,
+    def _compute(self, kpi_matrix, kpi_matrix_period,
+                 lang_id, aep,
                  date_from, date_to,
                  target_move,
                  company,
+                 subkpis_filter,
                  get_additional_move_line_filter=None,
-                 get_additional_query_filter=None,
-                 period_id=None):
-        """ Evaluate a report for a given period.
+                 get_additional_query_filter=None):
+        """ Evaluate a report for a given period, populating a KpiMatrix.
 
-        It returns a dictionary keyed on kpi.name with the following values:
-            * val: the evaluated kpi, or None if there is no data or an error
-            * val_r: the rendered kpi as a string, or #ERR, #DIV
-            * val_c: a comment (explaining the error, typically)
-            * style: the css style of the kpi
-                     (may change in the future!)
-            * prefix: a prefix to display in front of the rendered value
-            * suffix: a prefix to display after rendered value
-            * dp: the decimal precision of the kpi
-            * is_percentage: true if the kpi is of percentage type
-                             (may change in the future!)
-            * expr: the kpi expression
-            * drilldown: true if the drilldown method of
-                         mis.report.instance.period is going to do something
-                         useful in this kpi
-
+        :param kpi_matrix: the KpiMatrix object to be populated
+        :param kpi_matrix_period: the period key to use when populating
+                                  the KpiMatrix
         :param lang_id: id of a res.lang object
         :param aep: an AccountingExpressionProcessor instance created
                     using _prepare_aep()
         :param date_from, date_to: the starting and ending date
         :param target_move: all|posted
+        :param company:
         :param get_additional_move_line_filter: a bound method that takes
                                                 no arguments and returns
                                                 a domain compatible with
@@ -401,12 +650,16 @@ class MisReport(models.Model):
                                             query argument and returns a
                                             domain compatible with the query
                                             underlying model
-        :param period_id: an optional opaque value that is returned as
-                          query_id field in the result (may change in the
-                          future!)
+
+        For each kpi, it calls set_kpi_vals and set_kpi_exploded_vals
+        with vals being a tuple with the evaluation
+        result for sub-kpis, or a DataError object if the evaluation failed.
+
+        When done, it also calls set_localdict to store the local values
+        that served for the computation of the period.
+
         """
         self.ensure_one()
-        res = {}
 
         localdict = {
             'registry': self.pool,
@@ -424,61 +677,73 @@ class MisReport(models.Model):
         additional_move_line_filter = None
         if get_additional_move_line_filter:
             additional_move_line_filter = get_additional_move_line_filter()
-        aep.do_queries(date_from, date_to,
+        aep.do_queries(company,
+                       date_from, date_to,
                        target_move,
-                       company,
                        additional_move_line_filter)
 
         compute_queue = self.kpi_ids
         recompute_queue = []
         while True:
             for kpi in compute_queue:
-                try:
-                    kpi_val_comment = kpi.name + " = " + kpi.expression
-                    kpi_eval_expression = aep.replace_expr(kpi.expression)
-                    kpi_val = safe_eval(kpi_eval_expression, localdict)
-                    localdict[kpi.name] = kpi_val
-                except ZeroDivisionError:
-                    kpi_val = None
-                    kpi_val_rendered = '#DIV/0'
-                    kpi_val_comment += '\n\n%s' % (traceback.format_exc(),)
-                except (NameError, ValueError):
-                    recompute_queue.append(kpi)
-                    kpi_val = None
-                    kpi_val_rendered = '#ERR'
-                    kpi_val_comment += '\n\n%s' % (traceback.format_exc(),)
-                except:
-                    kpi_val = None
-                    kpi_val_rendered = '#ERR'
-                    kpi_val_comment += '\n\n%s' % (traceback.format_exc(),)
+                vals = []
+                has_error = False
+                for expression in kpi.expression_ids:
+                    if expression.subkpi_id and \
+                            subkpis_filter and \
+                            expression.subkpi_id not in subkpis_filter:
+                        continue
+                    try:
+                        kpi_eval_expression = aep.replace_expr(expression.name)
+                        vals.append(safe_eval(kpi_eval_expression, localdict))
+                    except ZeroDivisionError:
+                        has_error = True
+                        vals.append(DataError(
+                            '#DIV/0',
+                            '\n\n%s' % (traceback.format_exc(),)))
+                    except (NameError, ValueError):
+                        has_error = True
+                        recompute_queue.append(kpi)
+                        vals.append(DataError(
+                            '#ERR',
+                            '\n\n%s' % (traceback.format_exc(),)))
+                    except:
+                        has_error = True
+                        vals.append(DataError(
+                            '#ERR',
+                            '\n\n%s' % (traceback.format_exc(),)))
+
+                if len(vals) == 1 and isinstance(vals[0], SimpleArray):
+                    vals = vals[0]
                 else:
-                    kpi_val_rendered = kpi.render(lang_id, kpi_val)
+                    vals = SimpleArray(vals)
 
-                try:
-                    kpi_style = None
-                    if kpi.css_style:
-                        kpi_style = safe_eval(kpi.css_style, localdict)
-                except:
-                    _logger.warning("error evaluating css stype expression %s",
-                                    kpi.css_style, exc_info=True)
-                    kpi_style = None
+                kpi_matrix.set_kpi_vals(kpi_matrix_period, kpi, vals)
 
-                drilldown = (kpi_val is not None and
-                             AEP.has_account_var(kpi.expression))
+                if has_error:
+                    continue
 
-                res[kpi.name] = {
-                    'val': None if kpi_val is AccountingNone else kpi_val,
-                    'val_r': kpi_val_rendered,
-                    'val_c': kpi_val_comment,
-                    'style': kpi_style,
-                    'prefix': kpi.prefix,
-                    'suffix': kpi.suffix,
-                    'dp': kpi.dp,
-                    'is_percentage': kpi.type == 'pct',
-                    'period_id': period_id,
-                    'expr': kpi.expression,
-                    'drilldown': drilldown,
-                }
+                # no error, set it in localdict so it can be used
+                # in computing other kpis
+                localdict[kpi.name] = vals
+
+                # TODO FIXME handle exceptions
+                if not kpi.auto_expand_accounts:
+                    continue
+                expr = []
+                for expression in kpi.expression_ids:
+                    if expression.subkpi_id and \
+                            subkpis_filter and \
+                            expression.subkpi_id not in subkpis_filter:
+                        continue
+                    expr.append(expression.name)
+                expr = ', '.join(expr)  # tuple
+                for account_id, replaced_expr in \
+                        aep.replace_expr_by_account_id(expr):
+                    account_id_vals = safe_eval(replaced_expr, localdict)
+                    kpi_matrix.set_kpi_exploded_vals(kpi_matrix_period, kpi,
+                                                     account_id,
+                                                     account_id_vals)
 
             if len(recompute_queue) == 0:
                 # nothing to recompute, we are done
@@ -492,7 +757,7 @@ class MisReport(models.Model):
             compute_queue = recompute_queue
             recompute_queue = []
 
-        return res
+        kpi_matrix.set_localdict(kpi_matrix_period, localdict)
 
 
 class MisReportInstancePeriod(models.Model):
@@ -504,13 +769,23 @@ class MisReportInstancePeriod(models.Model):
     """
 
     @api.one
-    @api.depends('report_instance_id.pivot_date', 'type', 'offset', 'duration')
+    @api.depends('report_instance_id.pivot_date', 'type', 'offset',
+                 'duration',  'report_instance_id.comparison_mode')
     def _compute_dates(self):
         self.date_from = False
         self.date_to = False
         self.valid = False
-        d = fields.Date.from_string(self.report_instance_id.pivot_date)
-        if self.type == 'd':
+        report = self.report_instance_id
+        d = fields.Date.from_string(report.pivot_date)
+        if not report.comparison_mode:
+            self.date_from = report.date_from
+            self.date_to = report.date_to
+            self.valid = True
+        elif self.mode == 'fix':
+            self.date_from = self.manual_date_from
+            self.date_to = self.manual_date_to
+            self.valid = True
+        elif self.type == 'd':
             date_from = d + datetime.timedelta(days=self.offset)
             date_to = date_from + \
                 datetime.timedelta(days=self.duration - 1)
@@ -550,11 +825,14 @@ class MisReportInstancePeriod(models.Model):
 
     name = fields.Char(size=32, required=True,
                        string='Description', translate=True)
+    mode = fields.Selection([('fix', 'Fix'),
+                             ('relative', 'Relative'),
+                             ], required=True,
+                            default='fix')
     type = fields.Selection([('d', _('Day')),
                              ('w', _('Week')),
                              ('date_range', _('Date Range'))
                              ],
-                            required=True,
                             string='Period type')
     date_range_type_id = fields.Many2one(
         comodel_name='date.range.type', string='Date Range Type')
@@ -566,6 +844,11 @@ class MisReportInstancePeriod(models.Model):
                               default=1)
     date_from = fields.Date(compute='_compute_dates', string="From")
     date_to = fields.Date(compute='_compute_dates', string="To")
+    manual_date_from = fields.Date(string="From")
+    manual_date_to = fields.Date(string="To")
+    date_range_id = fields.Many2one(
+        comodel_name='date.range',
+        string='Date Range')
     valid = fields.Boolean(compute='_compute_dates',
                            type='boolean',
                            string='Valid')
@@ -583,6 +866,9 @@ class MisReportInstancePeriod(models.Model):
         string='Factor',
         help='Factor to use to normalize the period (used in comparison',
         default=1)
+    subkpi_ids = fields.Many2many(
+        'mis.report.subkpi',
+        string="Sub KPI Filter")
 
     _order = 'sequence, id'
 
@@ -594,6 +880,13 @@ class MisReportInstancePeriod(models.Model):
         ('name_unique', 'unique(name, report_instance_id)',
          'Period name should be unique by report'),
     ]
+
+    @api.onchange('date_range_id')
+    def onchange_date_range(self):
+        for record in self:
+            record.manual_date_from = record.date_range_id.date_start
+            record.manual_date_to = record.date_range_id.date_end
+            record.name = record.date_range_id.name
 
     @api.multi
     def _get_additional_move_line_filter(self):
@@ -626,6 +919,7 @@ class MisReportInstancePeriod(models.Model):
     @api.multi
     def drilldown(self, expr):
         self.ensure_one()
+        # TODO FIXME: drilldown by account
         if AEP.has_account_var(expr):
             aep = AEP(self.env)
             aep.parse_expr(expr)
@@ -650,17 +944,106 @@ class MisReportInstancePeriod(models.Model):
             return False
 
     @api.multi
-    def _compute(self, lang_id, aep):
+    def _compute(self, kpi_matrix, lang_id, aep):
+        """ Compute and render a mis report instance period
+
+        It returns a dictionary keyed on kpi.name with a list of dictionaries
+        with the following values (one item in the list for each subkpi):
+            * val: the evaluated kpi, or None if there is no data or an error
+            * val_r: the rendered kpi as a string, or #ERR, #DIV
+            * val_c: a comment (explaining the error, typically)
+            * style: the css style of the kpi
+                     (may change in the future!)
+            * prefix: a prefix to display in front of the rendered value
+            * suffix: a prefix to display after rendered value
+            * dp: the decimal precision of the kpi
+            * is_percentage: true if the kpi is of percentage type
+                             (may change in the future!)
+            * expr: the kpi expression
+            * drilldown: true if the drilldown method of
+                         mis.report.instance.period is going to do something
+                         useful in this kpi
+        """
         self.ensure_one()
-        return self.report_instance_id.report_id._compute(
+        # first invoke the compute method on the mis report template
+        # passing it all the information regarding period and filters
+        self.report_instance_id.report_id._compute(
+            kpi_matrix, self,
             lang_id, aep,
             self.date_from, self.date_to,
             self.report_instance_id.target_move,
             self.report_instance_id.company_id,
+            self.subkpi_ids,
             self._get_additional_move_line_filter,
             self._get_additional_query_filter,
-            period_id=self.id,
         )
+        # second, render it to something that can be used by the widget
+        res = {}
+        mis_report_kpi_style = self.env['mis.report.kpi.style']
+        for kpi_name, kpi, vals in kpi_matrix.iter_kpi_vals(self):
+            res[kpi_name] = []
+            try:
+                # TODO FIXME check style_expression evaluation wrt subkpis
+                kpi_style = None
+                if kpi.style_expression:
+                    style_name = safe_eval(kpi.style_expression,
+                                           kpi_matrix.get_localdict(self))
+                    styles = mis_report_kpi_style.search(
+                        [('name', '=', style_name)])
+                    kpi_style = styles and styles[0]
+            except:
+                _logger.warning("error evaluating css stype expression %s",
+                                kpi.style, exc_info=True)
+
+            default_vals = {
+                'prefix': kpi.prefix,
+                'suffix': kpi.suffix,
+                'dp': kpi.dp,
+                'is_percentage': kpi.type == 'pct',
+                'period_id': self.id,
+                'style': '',
+                'xlsx_style': {},
+            }
+            if kpi_style:
+                default_vals.update({
+                    'style': kpi_style.to_css_style(),
+                    'xlsx_style': kpi_style.to_xlsx_forma_properties(),
+                })
+
+            for idx, subkpi_val in enumerate(vals):
+                vals = default_vals.copy()
+                if isinstance(subkpi_val, DataError):
+                    vals.update({
+                        'val': subkpi_val.name,
+                        'val_r': subkpi_val.name,
+                        'val_c': subkpi_val.msg,
+                        'drilldown': False,
+                        })
+                else:
+                    if kpi.multi:
+                        expression = kpi.expression_ids[idx].name
+                        comment = '{}.{} = {}'.format(
+                            kpi.name,
+                            kpi.expression_ids[idx].subkpi_id.name,
+                            expression)
+                    else:
+                        expression = kpi.expression
+                        comment = '{} = {}'.format(
+                            kpi.name,
+                            expression)
+                    drilldown = (subkpi_val is not AccountingNone and
+                                 AEP.has_account_var(expression))
+                    vals.update({
+                        'val': (None
+                                if subkpi_val is AccountingNone
+                                else subkpi_val),
+                        'val_r': kpi.render(lang_id, subkpi_val),
+                        'val_c': comment,
+                        'expr': expression,
+                        'drilldown': drilldown,
+                    })
+                res[kpi_name].append(vals)
+        return res
 
 
 class MisReportInstance(models.Model):
@@ -684,8 +1067,8 @@ class MisReportInstance(models.Model):
 
     name = fields.Char(required=True,
                        string='Name', translate=True)
-    description = fields.Char(required=False,
-                              string='Description', translate=True)
+    description = fields.Char(related='report_id.description',
+                              readonly=True)
     date = fields.Date(string='Base date',
                        help='Report base date '
                             '(leave empty to use current date)')
@@ -709,6 +1092,39 @@ class MisReportInstance(models.Model):
                                  default=_default_company,
                                  required=True)
     landscape_pdf = fields.Boolean(string='Landscape PDF')
+    comparison_mode = fields.Boolean(
+        compute="_compute_comparison_mode",
+        inverse="_inverse_comparison_mode")
+    date_range_id = fields.Many2one(
+        comodel_name='date.range',
+        string='Date Range')
+    date_from = fields.Date(string="From")
+    date_to = fields.Date(string="To")
+    temporary = fields.Boolean(default=False)
+
+    @api.multi
+    def save_report(self):
+        self.ensure_one()
+        self.write({'temporary': False})
+        action = self.env.ref('mis_builder.mis_report_instance_view_action')
+        res = action.read()[0]
+        view = self.env.ref('mis_builder.mis_report_instance_view_form')
+        res.update({
+            'views': [(view.id, 'form')],
+            'res_id': self.id,
+            })
+        return res
+
+    @api.model
+    def _vacuum_report(self, hours=24):
+        clear_date = fields.Datetime.to_string(
+            datetime.datetime.now() - datetime.timedelta(hours=hours))
+        reports = self.search([
+            ('write_date', '<', clear_date),
+            ('temporary', '=', True),
+            ])
+        _logger.debug('Vacuum %s Temporary MIS Builder Report', len(reports))
+        return reports.unlink()
 
     @api.one
     def copy(self, default=None):
@@ -721,6 +1137,38 @@ class MisReportInstance(models.Model):
         date_format = self.env['res.lang'].browse(lang_id).date_format
         return datetime.datetime.strftime(
             fields.Date.from_string(date), date_format)
+
+    @api.multi
+    @api.depends('date_from')
+    def _compute_comparison_mode(self):
+        for instance in self:
+            instance.comparison_mode = bool(instance.period_ids) and\
+                not bool(instance.date_from)
+
+    @api.multi
+    def _inverse_comparison_mode(self):
+        for record in self:
+            if not record.comparison_mode:
+                if not record.date_from:
+                    record.date_from = datetime.now()
+                if not record.date_to:
+                    record.date_to = datetime.now()
+                record.period_ids.unlink()
+                record.write({'period_ids': [
+                    (0, 0, {
+                        'name': 'Default',
+                        'type': 'd',
+                        })
+                    ]})
+            else:
+                record.date_from = None
+                record.date_to = None
+
+    @api.onchange('date_range_id')
+    def onchange_date_range(self):
+        for record in self:
+            record.date_from = record.date_range_id.date_start
+            record.date_to = record.date_range_id.date_end
 
     @api.multi
     def preview(self):
@@ -790,45 +1238,74 @@ class MisReportInstance(models.Model):
 
         # compute kpi values for each period
         kpi_values_by_period_ids = {}
+        kpi_matrix = KpiMatrix()
         for period in self.period_ids:
             if not period.valid:
                 continue
-            kpi_values = period._compute(lang_id, aep)
+            kpi_values = period._compute(kpi_matrix, lang_id, aep)
             kpi_values_by_period_ids[period.id] = kpi_values
+        kpi_matrix.load_account_names(self.env['account.account'])
 
         # prepare header and content
-        header = []
-        header.append({
+        header = [{
             'kpi_name': '',
             'cols': []
-        })
+            }, {
+            'kpi_name': '',
+            'cols': []
+        }]
         content = []
         rows_by_kpi_name = {}
-        for kpi in self.report_id.kpi_ids:
-            rows_by_kpi_name[kpi.name] = {
-                'kpi_name': kpi.description,
+        for kpi_name, kpi_description, kpi in kpi_matrix.iter_kpis():
+            props = {
+                'kpi_name': kpi_description,
                 'cols': [],
-                'default_style': kpi.default_css_style
+                'default_style': '',
+                'default_xlsx_style': {},
             }
-            content.append(rows_by_kpi_name[kpi.name])
+            rows_by_kpi_name[kpi_name] = props
+            if kpi.style:
+                props.update({
+                    'default_style': kpi.style.to_css_style(),
+                    'default_xlsx_style': kpi.style.to_xlsx_format_properties()
+                })
+
+            content.append(rows_by_kpi_name[kpi_name])
 
         # populate header and content
         for period in self.period_ids:
             if not period.valid:
                 continue
             # add the column header
-            if period.duration > 1 or period.type == 'w':
+            if period.duration > 1 or period.type in ('w', 'date_range'):
                 # from, to
                 date_from = self._format_date(lang_id, period.date_from)
                 date_to = self._format_date(lang_id, period.date_to)
                 header_date = _('from %s to %s') % (date_from, date_to)
             else:
                 header_date = self._format_date(lang_id, period.date_from)
-            header[0]['cols'].append(dict(name=period.name, date=header_date))
+            subkpis = period.subkpi_ids or \
+                period.report_instance_id.report_id.subkpi_ids
+            header[0]['cols'].append(dict(
+                name=period.name,
+                date=header_date,
+                colspan=len(subkpis) or 1,
+                ))
+            if subkpis:
+                for subkpi in subkpis:
+                    header[1]['cols'].append(dict(
+                        name=subkpi.description,
+                        colspan=1,
+                        ))
+            else:
+                header[1]['cols'].append(dict(
+                    name="",
+                    colspan=1,
+                    ))
             # add kpi values
             kpi_values = kpi_values_by_period_ids[period.id]
             for kpi_name in kpi_values:
-                rows_by_kpi_name[kpi_name]['cols'].append(kpi_values[kpi_name])
+                rows_by_kpi_name[kpi_name]['cols'] += kpi_values[kpi_name]
 
             # add comparison columns
             for compare_col in period.comparison_column_ids:
@@ -850,6 +1327,8 @@ class MisReportInstance(models.Model):
                                 period.normalize_factor,
                                 compare_col.normalize_factor)
                         })
-
-        return {'header': header,
-                'content': content}
+        return {
+            'report_name': self.name,
+            'header': header,
+            'content': content,
+        }
