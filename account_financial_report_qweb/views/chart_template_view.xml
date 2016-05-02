@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openerp>
+<data>
+
+ <record id="view_account_chart_template_form" model="ir.ui.view">
+     <field name="model">account.chart.template</field>
+     <field name="inherit_id" ref="account.view_account_chart_template_form"/>
+     <field name="arch" type="xml">
+        <separator colspan="4" position="before">
+            <group string="Report Template" name="report_template" colspan="4">
+                <field name="trial_balance_report_id"/>
+                <field name="balance_sheet_report_id"/>
+                <field name="profit_and_loss_report_id"/>
+            </group>
+        </separator>
+    </field>
+ </record>
+
+</data>
+</openerp>

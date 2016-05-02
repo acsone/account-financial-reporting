@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openerp>
+<data>
+
+<record id="action_account_trial_balance_view" model="ir.actions.server">
+    <field name="name">Trial Balance</field>
+    <field name="model_id" ref="model_account_chart_template"/>
+    <field name="state">code</field>
+    <field name="code">action = model.get_report_action('trial_balance')</field>
+    <field name="type">ir.actions.server</field>
+    <field name="condition">True</field>
+</record>
+
+<record id="action_account_balance_sheet_view" model="ir.actions.server">
+    <field name="name">Balance Sheet</field>
+    <field name="model_id" ref="model_account_chart_template"/>
+    <field name="state">code</field>
+    <field name="code">action = model.get_report_action('balance_sheet')</field>
+    <field name="type">ir.actions.server</field>
+    <field name="condition">True</field>
+</record>
+
+<record id="action_account_profit_and_loss_view" model="ir.actions.server">
+    <field name="name">Profit and Lost</field>
+    <field name="model_id" ref="model_account_chart_template"/>
+    <field name="state">code</field>
+    <field name="code">action = model.get_report_action('profit_and_loss')</field>
+    <field name="type">ir.actions.server</field>
+    <field name="condition">True</field>
+</record>
+
+</data>
+</openerp>
