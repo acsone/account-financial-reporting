@@ -913,7 +913,7 @@ class MisReport(models.Model):
         if locals_dict is None:
             locals_dict = {}
 
-        locals_dict.update(self.prepare_localsdict())
+        locals_dict.update(self.prepare_locals_dict())
 
         # fetch non-accounting queries
         locals_dict.update(self._fetch_queries(
