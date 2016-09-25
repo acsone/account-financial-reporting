@@ -23,7 +23,7 @@
                         </tr>
                     </thead>
                     <tbody>
-                        <tr t-foreach="widget.mis_report_data.body" t-as="row" class="text-info">
+                        <tr t-foreach="widget.mis_report_data.body" t-as="row">
                             <td t-att="{'style': row.style}">
                                 <t t-esc="row.label"/>
                                 <t t-if="row.description">
