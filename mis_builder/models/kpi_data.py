@@ -23,6 +23,7 @@ class AbstractKpiDataFactory(models.AbstractModel):
 
     @api.model
     def _search_kpi_data(self, report_id, data_set, date_from, date_to):
+        """ return { kpi_id: aggregate value } """
         pass
 
 
@@ -42,6 +43,7 @@ class AbstractKpiData(models.AbstractModel):
         required=True)
     value = fields.Float(
         required=True)
+    data_set = fields.Char()
 
     _order = 'report_id, kpi_id, date_from'
 
