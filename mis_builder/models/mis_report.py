@@ -489,6 +489,11 @@ class MisReportKpi(models.Model):
                                       required=True,
                                       string='Comparison Method',
                                       default=CMP_PCT)
+    aggregate_method = fields.Selection([('sum', _('Sum')),
+                                         ('avg', _('Average'))],
+                                        required=True,
+                                        string='Aggregation Method',
+                                        default='sum')
     sequence = fields.Integer(string='Sequence', default=100)
     report_id = fields.Many2one('mis.report',
                                 string='Report',
