@@ -428,6 +428,7 @@ class MisReportInstancePeriod(models.Model):
         res = {}
         for query in self.report_instance_id.report_id.query_ids:
             model = self.env[query.model_id.model]
+            old_model = self.pool[query.model_id.model]
             eval_context = {
                 'env': self.env,
                 'time': time,
@@ -451,7 +452,9 @@ class MisReportInstancePeriod(models.Model):
                                (query.date_field.name, '<', datetime_to)])
             field_names = [f.name for f in query.field_ids]
             if not query.aggregate:
-                data = model.search_read(domain, field_names)
+                data = old_model.search_read(
+                    self.env.cr, self.env.uid, domain, field_names,
+                    context=self.env.context)
                 res[query.name] = [AutoStruct(**d) for d in data]
             elif query.aggregate == 'sum':
                 data = model.read_group(
@@ -462,7 +465,9 @@ class MisReportInstancePeriod(models.Model):
                     setattr(s, field_name, v)
                 res[query.name] = s
             else:
-                data = model.search_read(domain, field_names)
+                data = old_model.search_read(
+                    self.env.cr, self.env.uid, domain, field_names,
+                    context=self.env.context)
                 s = AutoStruct(count=len(data))
                 if query.aggregate == 'min':
                     agg = _min
