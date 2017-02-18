@@ -908,7 +908,8 @@ class MisReport(models.Model):
                                    subkpis_filter=None,
                                    get_additional_move_line_filter=None,
                                    get_additional_query_filter=None,
-                                   locals_dict=None):
+                                   locals_dict=None,
+                                   aml_model=None):
         """ Evaluate a report for a given period, populating a KpiMatrix.
 
         :param kpi_matrix: the KpiMatrix object to be populated created
