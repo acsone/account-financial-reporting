@@ -965,6 +965,20 @@ class MisReport(models.Model):
                 # build the list of expressions for this kpi
                 expressions = kpi._get_expressions(subkpis)
 
+                # if the kpi has been provided in locals_dict,
+                # (eg it comes from a budget), do not attempt to
+                # compute it, we simply add it to the matrix
+                if kpi.name in locals_dict:
+                    vals = locals_dict[kpi.name]
+                    if len(expressions) > 1:
+                        assert len(vals) == len(expressions)
+                    else:
+                        vals = [vals]
+                    kpi_matrix.set_values(
+                        kpi, col_key, vals,
+                        [None] * len(expressions))  # TODO: drilldown_args
+                    continue
+
                 vals = []
                 drilldown_args = []
                 name_error = False
