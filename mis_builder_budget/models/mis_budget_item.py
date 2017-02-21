@@ -41,6 +41,10 @@ class MisBudgetItem(models.Model):
                " ('date_end', '<=', budget_date_to)]",
         string='Date range',
     )
+    analytic_account_id = fields.Many2one(
+        comodel_name='account.analytic.account',
+        string="Analytic account",
+    )
 
     @api.onchange('date_range_id')
     def _onchange_date_range(self):

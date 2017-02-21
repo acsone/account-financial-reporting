@@ -3,6 +3,7 @@
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
 from odoo import models
+from odoo.osv import expression
 
 
 class MisReportInstance(models.Model):
@@ -13,7 +14,10 @@ class MisReportInstance(models.Model):
             self, aep, kpi_matrix, period, label, description):
 
         # fetch budget data for the period
-        base_domain = [('budget_id', '=', period.source_mis_budget.id)]
+        base_domain = expression.AND([
+            [('budget_id', '=', period.source_mis_budget.id)],
+            period._get_additional_budget_item_filter(),
+        ])
         kpi_data = self.env['mis.budget.item']._query_kpi_data(
             period.date_from, period.date_to, base_domain)
 
@@ -50,8 +54,6 @@ class MisReportInstance(models.Model):
             period.date_to,
             self.target_move,
             period.subkpi_ids,
-            get_additional_move_line_filter=None,  # TODO
-            get_additional_query_filter=None,
             locals_dict=locals_dict)
 
     def _add_column(self, aep, kpi_matrix, period, label, description):
