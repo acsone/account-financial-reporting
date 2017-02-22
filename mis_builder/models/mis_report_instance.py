@@ -188,9 +188,10 @@ class MisReportInstancePeriod(models.Model):
         string='Move lines source',
         domain=[('field_id.name', '=', 'debit'),
                 ('field_id.name', '=', 'credit'),
-                ('field_id.name', '=', 'account_id')],
-        help="A 'move line like' model, ie having at least debit, credit and "
-             "account_id fields.",
+                ('field_id.name', '=', 'account_id'),
+                ('field_id.name', '=', 'date')],
+        help="A 'move line like' model, ie having at least debit, credit, "
+             "date and account_id fields.",
     )
     source_sumcol_ids = fields.One2many(
         comodel_name='mis.report.instance.period.sum',
@@ -516,7 +517,7 @@ class MisReportInstance(models.Model):
             period.subkpi_ids,
             period._get_additional_move_line_filter,
             period._get_additional_query_filter,
-            aml_model=period.source_aml_model_id)
+            aml_model=period.source_aml_model_id.model)
 
     def _add_column_sumcol(
             self, aep, kpi_matrix, period, label, description):
@@ -579,16 +580,18 @@ class MisReportInstance(models.Model):
             aep = AEP(self.company_id)
             aep.parse_expr(expr)
             aep.done_parsing()
+            if period.source == 'actuals_alt':
+                aml_model_name = period.source_aml_model_id.model
+            else:
+                aml_model_name = 'account.move.line'
+            model = self.env[aml_model_name]
             domain = aep.get_aml_domain_for_expr(
                 expr,
                 period.date_from, period.date_to,
                 self.target_move,
-                account_id)
+                account_id,
+                aml_model=model)
             domain.extend(period._get_additional_move_line_filter())
-            if period.source == 'source_alt':
-                aml_model_name = period.source_aml_model_id.name
-            else:
-                aml_model_name = 'account.move.line'
             return {
                 'name': u'{} - {}'.format(expr, period.name),
                 'domain': domain,

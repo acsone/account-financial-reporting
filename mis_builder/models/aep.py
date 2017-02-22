@@ -167,7 +167,8 @@ class AccountingExpressionProcessor(object):
     def get_aml_domain_for_expr(self, expr,
                                 date_from, date_to,
                                 target_move,
-                                account_id=None):
+                                account_id=None,
+                                aml_model=None):
         """ Get a domain on account.move.line for an expression.
 
         Prerequisite: done_parsing() must have been invoked.
@@ -198,14 +199,16 @@ class AccountingExpressionProcessor(object):
             if mode not in date_domain_by_mode:
                 date_domain_by_mode[mode] = \
                     self.get_aml_domain_for_dates(date_from, date_to,
-                                                  mode, target_move)
+                                                  mode, target_move,
+                                                  aml_model=aml_model)
         assert aml_domains
         return expression.OR(aml_domains) + \
             expression.OR(date_domain_by_mode.values())
 
     def get_aml_domain_for_dates(self, date_from, date_to,
-                                 mode,
-                                 target_move):
+                                 mode, target_move, aml_model=None):
+        if not aml_model:
+            aml_model = self.company.env['account.move.line']
         if mode == self.MODE_VARIATION:
             domain = [('date', '>=', date_from), ('date', '<=', date_to)]
         elif mode in (self.MODE_INITIAL, self.MODE_END):
@@ -230,7 +233,7 @@ class AccountingExpressionProcessor(object):
                 compute_fiscalyear_dates(date_from_date)['date_from']
             domain = [('date', '<', fields.Date.to_string(fy_date_from)),
                       ('user_type_id.include_initial_balance', '=', False)]
-        if target_move == 'posted':
+        if target_move == 'posted' and aml_model.name == 'account.move.line':
             domain.append(('move_id.state', '=', 'posted'))
         return expression.normalize_domain(domain)
 
@@ -244,6 +247,8 @@ class AccountingExpressionProcessor(object):
         """
         if not aml_model:
             aml_model = self.company.env['account.move.line']
+        else:
+            aml_model = self.company.env[aml_model]
         # {(domain, mode): {account_id: (debit, credit)}}
         self._data = defaultdict(dict)
         domain_by_mode = {}
@@ -257,7 +262,7 @@ class AccountingExpressionProcessor(object):
             if mode not in domain_by_mode:
                 domain_by_mode[mode] = \
                     self.get_aml_domain_for_dates(date_from, date_to,
-                                                  mode, target_move)
+                                                  mode, target_move, aml_model)
             domain = list(domain) + domain_by_mode[mode]
             domain.append(('account_id', 'in', self._map_account_ids[key]))
             if additional_move_line_filter:

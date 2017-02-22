@@ -985,7 +985,8 @@ class MisReport(models.Model):
             additional_move_line_filter = get_additional_move_line_filter()
         aep.do_queries(date_from, date_to,
                        target_move,
-                       additional_move_line_filter)
+                       additional_move_line_filter,
+                       aml_model)
 
         if subkpis_filter:
             subkpis = [subkpi for subkpi in self.subkpi_ids
