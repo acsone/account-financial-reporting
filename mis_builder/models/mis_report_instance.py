@@ -354,6 +354,7 @@ class MisReportInstance(models.Model):
     date_from = fields.Date(string="From")
     date_to = fields.Date(string="To")
     temporary = fields.Boolean(default=False)
+    remove_empty_lines = fields.Boolean(default=False)
 
     @api.multi
     def save_report(self):
@@ -564,6 +565,8 @@ class MisReportInstance(models.Model):
             self._add_column(aep, kpi_matrix, period, period.name, description)
         kpi_matrix.compute_comparisons()
         kpi_matrix.compute_sums()
+        if self.remove_empty_lines:
+            kpi_matrix.remove_empty_lines()
         return kpi_matrix
 
     @api.multi

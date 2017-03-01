@@ -499,6 +499,16 @@ class KpiMatrix(object):
             'body': body,
         }
 
+    def remove_empty_lines(self):
+        for row in self.iter_rows():
+            empty_row = True
+            for cell in row.iter_cells():
+                if cell.val is not AccountingNone:
+                    empty_row = False
+                    break
+            if empty_row:
+                self._kpi_rows.pop(row.kpi, False)
+
 
 def _utc_midnight(d, tz_name, add_day=0):
     d = fields.Datetime.from_string(d) + datetime.timedelta(days=add_day)
