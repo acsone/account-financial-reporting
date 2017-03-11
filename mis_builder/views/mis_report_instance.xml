@@ -67,6 +67,7 @@
                             <field name="company_id" groups="base.group_multi_company"/>
                             <field name="target_move" widget="radio"/>
                             <field name="landscape_pdf"/>
+                            <field name="remove_empty_lines" />
                             <field name="comparison_mode"/>
                         </group>
                         <group>
