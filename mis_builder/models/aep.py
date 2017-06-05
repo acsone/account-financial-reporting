@@ -164,6 +164,18 @@ class AccountingExpressionProcessor(object):
         """Test if an string contains an accounting variable."""
         return bool(cls._ACC_RE.search(expr))
 
+    def get_account_ids_for_expr(self, expr):
+        """ Get a set of account ids that are involved in an expression.
+
+        Prerequisite: done_parsing() must have been invoked.
+        """
+        account_ids = set()
+        for mo in self._ACC_RE.finditer(expr):
+            field, mode, account_codes, domain = self._parse_match_object(mo)
+            for account_code in account_codes:
+                account_ids.update(self._account_ids_by_code[account_code])
+        return account_ids
+
     def get_aml_domain_for_expr(self, expr,
                                 date_from, date_to,
                                 target_move,
@@ -235,13 +247,17 @@ class AccountingExpressionProcessor(object):
         return expression.normalize_domain(domain)
 
     def do_queries(self, date_from, date_to,
-                   target_move='posted', additional_move_line_filter=None):
+                   target_move='posted', additional_move_line_filter=None,
+                   aml_model=None):
         """Query sums of debit and credit for all accounts and domains
         used in expressions.
 
         This method must be executed after done_parsing().
         """
-        aml_model = self.company.env['account.move.line']
+        if not aml_model:
+            aml_model = self.company.env['account.move.line']
+        else:
+            aml_model = self.company.env[aml_model]
         # {(domain, mode): {account_id: (debit, credit)}}
         self._data = defaultdict(dict)
         domain_by_mode = {}
