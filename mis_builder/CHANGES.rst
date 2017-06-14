@@ -6,6 +6,19 @@ Changelog
 ..
 .. *
 
+10.0.3.0.0 (unreleased)
+~~~~~~~~~~~~~~~~~~~~~~~
+
+* [ADD] Alternative move line source per report column.
+  This makes mis buidler accounting expressions work on any model
+  that has debit, credit and account_id fields. Provided you can
+  expose, say, committed purchases, or your budget as a view with
+  debit, credit and account_id, this opens up a lot of possibilities
+* [ADD] Comparison column source (more flexible than the previous,
+  now deprecated, comparison mechanism).
+* [ADD] Sum column source, to create columns that add/subtract
+  other columns.
+
 10.0.2.0.3 (unreleased)
 ~~~~~~~~~~~~~~~~~~~~~~~
 
