@@ -36,7 +36,7 @@ before_install:
   - "sh -e /etc/init.d/xvfb start"
 
 install:
-  - git clone https://github.com/OCA/maintainer-quality-tools.git ${HOME}/maintainer-quality-tools
+  - git clone -b pip-install-sbi https://github.com/acsone/maintainer-quality-tools.git ${HOME}/maintainer-quality-tools
   - export PATH=${HOME}/maintainer-quality-tools/travis:${PATH}
   - travis_install_nightly
 

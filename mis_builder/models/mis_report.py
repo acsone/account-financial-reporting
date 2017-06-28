@@ -4,12 +4,12 @@
 
 from collections import defaultdict, OrderedDict
 import datetime
-import dateutil
 from itertools import izip
 import logging
 import re
 import time
 
+import dateutil
 import pytz
 
 from odoo import api, fields, models, _
@@ -23,6 +23,9 @@ from .simple_array import SimpleArray
 from .mis_safe_eval import mis_safe_eval, DataError, NameDataError
 from .mis_report_style import (
     TYPE_NUM, TYPE_PCT, TYPE_STR, CMP_DIFF, CMP_PCT, CMP_NONE
+)
+from .mis_kpi_data import (
+    ACC_SUM, ACC_AVG, ACC_NONE
 )
 
 _logger = logging.getLogger(__name__)
@@ -83,10 +86,17 @@ class KpiMatrixRow(object):
         for subcol in subcols:
             yield subcol.get_cell_for_row(self)
 
+    def is_empty(self):
+        for cell in self.iter_cells():
+            if cell and cell.val not in (AccountingNone, None):
+                return False
+        return True
+
 
 class KpiMatrixCol(object):
 
-    def __init__(self, label, description, locals_dict, subkpis):
+    def __init__(self, key, label, description, locals_dict, subkpis):
+        self.key = key
         self.label = label
         self.description = description
         self.locals_dict = locals_dict
@@ -171,7 +181,8 @@ class KpiMatrix(object):
         self._cols = OrderedDict()
         # { col_key (left of comparison): [(col_key, base_col_key)] }
         self._comparison_todo = defaultdict(list)
-        self._comparison_cols = defaultdict(list)
+        # { col_key (left of sum): (col_key, [(sign, sum_col_key)])
+        self._sum_todo = {}
         # { account_id: account_name }
         self._account_names = {}
 
@@ -187,32 +198,44 @@ class KpiMatrix(object):
                     locals_dict, subkpis):
         """ Declare a new column, giving it an identifier (key).
 
-        Invoke this and declare_comparison in display order.
+        Invoke the declare_* methods in display order.
         """
-        col = KpiMatrixCol(label, description, locals_dict, subkpis)
+        col = KpiMatrixCol(col_key, label, description, locals_dict, subkpis)
         self._cols[col_key] = col
         return col
 
-    def declare_comparison(self, col_key, base_col_key):
+    def declare_comparison(self, cmpcol_key, col_key, base_col_key,
+                           label, description=None):
         """ Declare a new comparison column.
 
-        Invoke this and declare_col in display order.
+        Invoke the declare_* methods in display order.
         """
-        last_col_key = list(self._cols.keys())[-1]
-        self._comparison_todo[last_col_key].append(
-            (col_key, base_col_key))
+        self._comparison_todo[cmpcol_key] = \
+            (col_key, base_col_key, label, description)
+        self._cols[cmpcol_key] = None  # reserve slot in insertion order
+
+    def declare_sum(self, sumcol_key, col_to_sum_keys,
+                    label, description=None, sum_accdet=False):
+        """ Declare a new summation column.
+
+        Invoke the declare_* methods in display order.
+        :param col_to_sum_keys: [(sign, col_key)]
+        """
+        self._sum_todo[sumcol_key] = \
+            (col_to_sum_keys, label, description, sum_accdet)
+        self._cols[sumcol_key] = None  # reserve slot in insertion order
 
     def set_values(self, kpi, col_key, vals,
-                   drilldown_args):
+                   drilldown_args, tooltips=True):
         """ Set values for a kpi and a colum.
 
         Invoke this after declaring the kpi and the column.
         """
         self.set_values_detail_account(kpi, col_key, None, vals,
-                                       drilldown_args)
+                                       drilldown_args, tooltips)
 
     def set_values_detail_account(self, kpi, col_key, account_id, vals,
-                                  drilldown_args):
+                                  drilldown_args, tooltips=True):
         """ Set values for a kpi and a column and a detail account.
 
         Invoke this after declaring the kpi and the column.
@@ -238,11 +261,11 @@ class KpiMatrix(object):
             else:
                 val_rendered = self._style_model.render(
                     self.lang, row.style_props, kpi.type, val)
-                if subcol.subkpi:
+                if row.kpi.multi and subcol.subkpi:
                     val_comment = u'{}.{} = {}'.format(
                         row.kpi.name,
                         subcol.subkpi.name,
-                        row.kpi._get_expression_for_subkpi(subcol.subkpi))
+                        row.kpi._get_expression_str_for_subkpi(subcol.subkpi))
                 else:
                     val_comment = u'{} = {}'.format(
                         row.kpi.name,
@@ -264,66 +287,122 @@ class KpiMatrix(object):
                             [row.style_props, style[0]])
                     else:
                         _logger.error("Style '%s' not found.", style_name)
-            cell = KpiMatrixCell(row, subcol, val, val_rendered, val_comment,
+            cell = KpiMatrixCell(row, subcol, val, val_rendered,
+                                 tooltips and val_comment or None,
                                  cell_style_props, drilldown_arg)
             cell_tuple.append(cell)
         assert len(cell_tuple) == col.colspan
         col._set_cell_tuple(row, cell_tuple)
+
+    def _common_subkpis(self, cols):
+        if not cols:
+            return set()
+        common_subkpis = set(cols[0].subkpis)
+        for col in cols[1:]:
+            common_subkpis = common_subkpis & set(col.subkpis)
+        return common_subkpis
 
     def compute_comparisons(self):
         """ Compute comparisons.
 
         Invoke this after setting all values.
         """
-        for pos_col_key, comparisons in self._comparison_todo.items():
-            for col_key, base_col_key in comparisons:
-                col = self._cols[col_key]
-                base_col = self._cols[base_col_key]
-                common_subkpis = set(col.subkpis) & set(base_col.subkpis)
-                if (col.subkpis or base_col.subkpis) and not common_subkpis:
-                    raise UserError('Columns {} and {} are not comparable'.
-                                    format(col.description,
-                                           base_col.description))
+        for cmpcol_key, (col_key, base_col_key, label, description) in \
+                self._comparison_todo.items():
+            col = self._cols[col_key]
+            base_col = self._cols[base_col_key]
+            common_subkpis = self._common_subkpis([col, base_col])
+            if (col.subkpis or base_col.subkpis) and not common_subkpis:
+                raise UserError(_('Columns {} and {} are not comparable').
+                                format(col.description,
+                                       base_col.description))
+            if not label:
                 label = u'{} vs {}'.\
                     format(col.label, base_col.label)
-                comparison_col = KpiMatrixCol(label, None, {},
-                                              sorted(common_subkpis,
-                                                     key=lambda s: s.sequence))
-                for row in self.iter_rows():
-                    cell_tuple = col.get_cell_tuple_for_row(row)
-                    base_cell_tuple = base_col.get_cell_tuple_for_row(row)
-                    if cell_tuple is None and base_cell_tuple is None:
-                        continue
+            comparison_col = KpiMatrixCol(cmpcol_key, label, description, {},
+                                          sorted(common_subkpis,
+                                                 key=lambda s: s.sequence))
+            self._cols[cmpcol_key] = comparison_col
+            for row in self.iter_rows():
+                cell_tuple = col.get_cell_tuple_for_row(row)
+                base_cell_tuple = base_col.get_cell_tuple_for_row(row)
+                if cell_tuple is None and base_cell_tuple is None:
+                    continue
+                if cell_tuple is None:
+                    vals = [AccountingNone] * \
+                        (len(common_subkpis) or 1)
+                else:
+                    vals = [cell.val for cell in cell_tuple
+                            if not common_subkpis or
+                            cell.subcol.subkpi in common_subkpis]
+                if base_cell_tuple is None:
+                    base_vals = [AccountingNone] * \
+                        (len(common_subkpis) or 1)
+                else:
+                    base_vals = [cell.val for cell in base_cell_tuple
+                                 if not common_subkpis or
+                                 cell.subcol.subkpi in common_subkpis]
+                comparison_cell_tuple = []
+                for val, base_val, comparison_subcol in \
+                        izip(vals,
+                             base_vals,
+                             comparison_col.iter_subcols()):
+                    # TODO FIXME average factors
+                    delta, delta_r, style_r = \
+                        self._style_model.compare_and_render(
+                            self.lang, row.style_props,
+                            row.kpi.type, row.kpi.compare_method,
+                            val, base_val, 1, 1)
+                    comparison_cell_tuple.append(KpiMatrixCell(
+                        row, comparison_subcol, delta, delta_r, None,
+                        style_r, None))
+                comparison_col._set_cell_tuple(row, comparison_cell_tuple)
+
+    def compute_sums(self):
+        """ Compute comparisons.
+
+        Invoke this after setting all values.
+        """
+        for sumcol_key, (col_to_sum_keys, label, description, sum_accdet) in \
+                self._sum_todo.items():
+            sumcols = [self._cols[k] for (sign, k) in col_to_sum_keys]
+            # TODO check all sumcols are resolved; we need a kind of
+            #      recompute queue here so we don't depend on insertion
+            #      order
+            common_subkpis = self._common_subkpis(sumcols)
+            if any(c.subkpis for c in sumcols) and not common_subkpis:
+                raise UserError(_('Sum cannot be computed in column {} '
+                                  'because the columns to sum have no '
+                                  'common subkpis').format(label))
+            sum_col = KpiMatrixCol(sumcol_key, label, description, {},
+                                   sorted(common_subkpis,
+                                          key=lambda s: s.sequence))
+            self._cols[sumcol_key] = sum_col
+            for row in self.iter_rows():
+                if row.kpi.accumulation_method != ACC_SUM:
+                    continue
+                if row.account_id and not sum_accdet:
+                    continue
+                acc = SimpleArray(
+                    [AccountingNone] * (len(common_subkpis) or 1))
+                for sign, col_to_sum in col_to_sum_keys:
+                    cell_tuple = self._cols[col_to_sum].\
+                        get_cell_tuple_for_row(row)
                     if cell_tuple is None:
-                        vals = [AccountingNone] * \
-                            (len(common_subkpis) or 1)
+                        vals = \
+                            [AccountingNone] * (len(common_subkpis) or 1)
                     else:
                         vals = [cell.val for cell in cell_tuple
                                 if not common_subkpis or
                                 cell.subcol.subkpi in common_subkpis]
-                    if base_cell_tuple is None:
-                        base_vals = [AccountingNone] * \
-                            (len(common_subkpis) or 1)
+                    if sign == '+':
+                        acc += SimpleArray(vals)
                     else:
-                        base_vals = [cell.val for cell in base_cell_tuple
-                                     if not common_subkpis or
-                                     cell.subcol.subkpi in common_subkpis]
-                    comparison_cell_tuple = []
-                    for val, base_val, comparison_subcol in \
-                            izip(vals,
-                                 base_vals,
-                                 comparison_col.iter_subcols()):
-                        # TODO FIXME average factors
-                        delta, delta_r, style_r = \
-                            self._style_model.compare_and_render(
-                                self.lang, row.style_props,
-                                row.kpi.type, row.kpi.compare_method,
-                                val, base_val, 1, 1)
-                        comparison_cell_tuple.append(KpiMatrixCell(
-                            row, comparison_subcol, delta, delta_r, None,
-                            style_r, None))
-                    comparison_col._set_cell_tuple(row, comparison_cell_tuple)
-                self._comparison_cols[pos_col_key].append(comparison_col)
+                        acc -= SimpleArray(vals)
+                self.set_values_detail_account(
+                    row.kpi, sumcol_key, row.account_id, acc,
+                    [None] * (len(common_subkpis) or 1),
+                    tooltips=False)
 
     def iter_rows(self):
         """ Iterate rows in display order.
@@ -333,7 +412,7 @@ class KpiMatrix(object):
         for kpi_row in self._kpi_rows.values():
             yield kpi_row
             detail_rows = self._detail_rows[kpi_row.kpi].values()
-            detail_rows = sorted(detail_rows, key=lambda r: r.description)
+            detail_rows = sorted(detail_rows, key=lambda r: r.label)
             for detail_row in detail_rows:
                 yield detail_row
 
@@ -344,8 +423,6 @@ class KpiMatrix(object):
         """
         for col_key, col in self._cols.items():
             yield col
-            for comparison_col in self._comparison_cols[col_key]:
-                yield comparison_col
 
     def iter_subcols(self):
         """ Iterate sub columns in display order.
@@ -388,6 +465,8 @@ class KpiMatrix(object):
 
         body = []
         for row in self.iter_rows():
+            if row.style_props.hide_empty and row.is_empty():
+                continue
             row_data = {
                 'row_id': row.row_id,
                 'parent_row_id': (row.parent_row and
@@ -464,7 +543,11 @@ class MisReportKpi(models.Model):
     expression = fields.Char(
         compute='_compute_expression',
         inverse='_inverse_expression')
-    expression_ids = fields.One2many('mis.report.kpi.expression', 'kpi_id')
+    expression_ids = fields.One2many(
+        comodel_name='mis.report.kpi.expression',
+        inverse_name='kpi_id',
+        copy=True,
+    )
     auto_expand_accounts = fields.Boolean(string='Display details by account')
     auto_expand_accounts_style_id = fields.Many2one(
         string="Style for account detail rows",
@@ -492,9 +575,25 @@ class MisReportKpi(models.Model):
                                       required=True,
                                       string='Comparison Method',
                                       default=CMP_PCT)
+    accumulation_method = fields.Selection(
+        [(ACC_SUM, _('Sum')),
+         (ACC_AVG, _('Average')),
+         (ACC_NONE, _('None'))],
+        required=True,
+        string="Accumulation Method",
+        default=ACC_SUM,
+        help="Determines how values of this kpi spanning over a "
+             "time period are transformed to match the reporting period. "
+             "Sum: values of shorter period are added, "
+             "values of longest or partially overlapping periods are "
+             "adjusted pro-rata temporis.\n"
+             "Average: values of included period are averaged "
+             "with a pro-rata temporis weight.",
+    )
     sequence = fields.Integer(string='Sequence', default=100)
     report_id = fields.Many2one('mis.report',
                                 string='Report',
+                                required=True,
                                 ondelete='cascade')
 
     _order = 'sequence, id'
@@ -576,16 +675,23 @@ class MisReportKpi(models.Model):
     def _onchange_type(self):
         if self.type == TYPE_NUM:
             self.compare_method = CMP_PCT
+            self.accumulation_method = ACC_SUM
         elif self.type == TYPE_PCT:
             self.compare_method = CMP_DIFF
+            self.accumulation_method = ACC_AVG
         elif self.type == TYPE_STR:
             self.compare_method = CMP_NONE
+            self.accumulation_method = ACC_NONE
+
+    def _get_expression_str_for_subkpi(self, subkpi):
+        e = self._get_expression_for_subkpi(subkpi)
+        return e and e.name or ''
 
     def _get_expression_for_subkpi(self, subkpi):
         for expression in self.expression_ids:
             if expression.subkpi_id == subkpi:
-                return expression.name or 'AccountingNone'
-        return 'AccountingNone'
+                return expression
+        return None
 
     def _get_expressions(self, subkpis):
         if subkpis and self.multi:
@@ -597,17 +703,21 @@ class MisReportKpi(models.Model):
             if self.expression_ids:
                 assert len(self.expression_ids) == 1
                 assert not self.expression_ids[0].subkpi_id
-                return [self.expression_ids[0].name or 'AccountingNone']
+                return self.expression_ids
             else:
-                return ['AccountingNone']
+                return [None]
 
 
 class MisReportSubkpi(models.Model):
     _name = 'mis.report.subkpi'
     _order = 'sequence'
 
-    sequence = fields.Integer()
-    report_id = fields.Many2one('mis.report')
+    sequence = fields.Integer(default=1)
+    report_id = fields.Many2one(
+        comodel_name='mis.report',
+        required=True,
+        ondelete='cascade',
+    )
     name = fields.Char(size=32, required=True,
                        string='Name')
     description = fields.Char(required=True,
@@ -638,12 +748,6 @@ class MisReportSubkpi(models.Model):
         if self.description and not self.name:
             self.name = _python_var(self.description)
 
-    @api.multi
-    def unlink(self):
-        for subkpi in self:
-            subkpi.expression_ids.unlink()
-        return super(MisReportSubkpi, self).unlink()
-
 
 class MisReportKpiExpression(models.Model):
     """ A KPI Expression is an expression of a line of a MIS report Kpi.
@@ -658,16 +762,45 @@ class MisReportKpiExpression(models.Model):
         store=True,
         readonly=True)
     name = fields.Char(string='Expression')
-    kpi_id = fields.Many2one('mis.report.kpi', required=True)
+    kpi_id = fields.Many2one(
+        'mis.report.kpi', required=True, ondelete='cascade')
     # TODO FIXME set readonly=True when onchange('subkpi_ids') below works
     subkpi_id = fields.Many2one(
         'mis.report.subkpi',
-        readonly=False)
+        readonly=False,
+        ondelete='cascade')
 
     _sql_constraints = [
         ('subkpi_kpi_unique', 'unique(subkpi_id, kpi_id)',
          'Sub KPI must be used once and only once for each KPI'),
     ]
+
+    @api.multi
+    def name_get(self):
+        res = []
+        for rec in self:
+            if rec.subkpi_id:
+                name = u'{}.{}'.format(
+                    rec.kpi_id.name, rec.subkpi_id.name)
+            else:
+                name = rec.kpi_id.name
+            res.append((rec.id, name))
+        return res
+
+    @api.model
+    def name_search(self, name='', args=None, operator='ilike', limit=100):
+        domain = args or []
+        if '.' in name:
+            kpi_name, subkpi_name = name.split('.', 2)
+            domain += [
+                ('kpi_id.name', '=', kpi_name),
+                ('subkpi_id.name', operator, subkpi_name),
+            ]
+        else:
+            domain += [
+                ('kpi_id.name', operator, name),
+            ]
+        return self.search(domain, limit=limit).name_get()
 
 
 class MisReportQuery(models.Model):
@@ -688,7 +821,8 @@ class MisReportQuery(models.Model):
     name = fields.Char(size=32, required=True,
                        string='Name')
     model_id = fields.Many2one('ir.model', required=True,
-                               string='Model')
+                               string='Model',
+                               ondelete='restrict')
     field_ids = fields.Many2many('ir.model.fields', required=True,
                                  string='Fields to fetch')
     field_names = fields.Char(compute='_compute_field_names',
@@ -701,9 +835,11 @@ class MisReportQuery(models.Model):
     date_field = fields.Many2one('ir.model.fields', required=True,
                                  string='Date field',
                                  domain=[('ttype', 'in',
-                                         ('date', 'datetime'))])
+                                         ('date', 'datetime'))],
+                                 ondelete='restrict')
     domain = fields.Char(string='Domain')
     report_id = fields.Many2one('mis.report', string='Report',
+                                required=True,
                                 ondelete='cascade')
 
     _order = 'name'
@@ -792,9 +928,21 @@ class MisReport(models.Model):
     @api.multi
     def copy(self, default=None):
         self.ensure_one()
-        default = dict(default or {})
+        default = dict(default or [])
         default['name'] = _('%s (copy)') % self.name
-        return super(MisReport, self).copy(default)
+        new = super(MisReport, self).copy(default)
+        # after a copy, we have new subkpis, but the expressions
+        # subkpi_id fields still point to the original one, so
+        # we patch them after copying
+        subkpis_by_name = dict((sk.name, sk) for sk in new.subkpi_ids)
+        for subkpi in self.subkpi_ids:
+            # search expressions linked to subkpis of the original report
+            exprs = self.env['mis.report.kpi.expression'].search([
+                ('kpi_id.report_id', '=', new.id),
+                ('subkpi_id', '=', subkpi.id)])
+            # and replace them with references to subkpis of the new report
+            exprs.write({'subkpi_id': subkpis_by_name[subkpi.name].id})
+        return new
 
     # TODO: kpi name cannot be start with query name
 
@@ -895,6 +1043,100 @@ class MisReport(models.Model):
                 res[query.name] = s
         return res
 
+    def _declare_and_compute_col(self,
+                                 kpi_matrix,
+                                 col_key,
+                                 col_label,
+                                 col_description,
+                                 subkpis_filter,
+                                 locals_dict,
+                                 eval_expressions,
+                                 eval_expressions_by_account):
+        """This is the main computation loop.
+
+        It evaluates the kpis and puts the results in the KpiMatrix.
+        Evaluation is done through callback methods so data sources
+        can provide their own mean of obtaining the data (eg preset
+        kpi values for budget, or alternative move line sources).
+        """
+
+        if subkpis_filter:
+            subkpis = [subkpi for subkpi in self.subkpi_ids
+                       if subkpi in subkpis_filter]
+        else:
+            subkpis = self.subkpi_ids
+
+        col = kpi_matrix.declare_col(col_key,
+                                     col_label, col_description,
+                                     locals_dict, subkpis)
+
+        compute_queue = self.kpi_ids
+        recompute_queue = []
+        while True:
+            for kpi in compute_queue:
+                # build the list of expressions for this kpi
+                expressions = kpi._get_expressions(subkpis)
+
+                vals, drilldown_args, name_error = \
+                    eval_expressions(expressions, locals_dict)
+
+                if name_error:
+                    recompute_queue.append(kpi)
+                else:
+                    # no error, set it in locals_dict so it can be used
+                    # in computing other kpis
+                    if len(expressions) == 1:
+                        locals_dict[kpi.name] = vals[0]
+                    else:
+                        locals_dict[kpi.name] = SimpleArray(vals)
+
+                # even in case of name error we set the result in the matrix
+                # so the name error will be displayed if it cannot be
+                # resolved by recomputing later
+
+                if len(expressions) == 1 and col.colspan > 1:
+                    # here we have one expression for this kpi, but
+                    # multiple subkpis (so this kpi is most probably
+                    # a sum or other operation on multi-valued kpis)
+                    if isinstance(vals[0], tuple):
+                        vals = vals[0]
+                        assert len(vals) == col.colspan
+                    elif isinstance(vals[0], DataError):
+                        vals = (vals[0],) * col.colspan
+                    else:
+                        raise UserError(_("Probably not your fault... but I'm "
+                                          "really curious to know how you "
+                                          "managed to raise this error so "
+                                          "I can handle one more corner "
+                                          "case!"))
+                if len(drilldown_args) != col.colspan:
+                    drilldown_args = [None] * col.colspan
+
+                kpi_matrix.set_values(
+                    kpi, col_key, vals, drilldown_args)
+
+                if name_error or \
+                        not kpi.auto_expand_accounts or \
+                        not eval_expressions_by_account:
+                    continue
+
+                for account_id, vals, drilldown_args, name_error in \
+                        eval_expressions_by_account(expressions, locals_dict):
+                    kpi_matrix.set_values_detail_account(
+                        kpi, col_key, account_id, vals, drilldown_args)
+
+            if len(recompute_queue) == 0:
+                # nothing to recompute, we are done
+                break
+            if len(recompute_queue) == len(compute_queue):
+                # could not compute anything in this iteration
+                # (ie real Name errors or cyclic dependency)
+                # so we stop trying
+                break
+            # try again
+            compute_queue = recompute_queue
+            recompute_queue = []
+
     @api.multi
     def declare_and_compute_period(self, kpi_matrix,
                                    col_key,
@@ -906,7 +1148,8 @@ class MisReport(models.Model):
                                    subkpis_filter=None,
                                    get_additional_move_line_filter=None,
                                    get_additional_query_filter=None,
-                                   locals_dict=None):
+                                   locals_dict=None,
+                                   aml_model=None):
         """ Evaluate a report for a given period, populating a KpiMatrix.
 
         :param kpi_matrix: the KpiMatrix object to be populated created
@@ -945,99 +1188,66 @@ class MisReport(models.Model):
             additional_move_line_filter = get_additional_move_line_filter()
         aep.do_queries(date_from, date_to,
                        target_move,
-                       additional_move_line_filter)
+                       additional_move_line_filter,
+                       aml_model)
 
-        if subkpis_filter:
-            subkpis = [subkpi for subkpi in self.subkpi_ids
-                       if subkpi in subkpis_filter]
-        else:
-            subkpis = self.subkpi_ids
-        col = kpi_matrix.declare_col(col_key,
-                                     col_label, col_description,
-                                     locals_dict, subkpis)
+        def eval_expressions(expressions, locals_dict):
+            expressions = [e and e.name or 'AccountingNone'
+                           for e in expressions]
+            vals = []
+            drilldown_args = []
+            name_error = False
+            for expression in expressions:
+                val = AccountingNone
+                drilldown_arg = None
+                if expression:
+                    replaced_expr = aep.replace_expr(expression)
+                    val = mis_safe_eval(replaced_expr, locals_dict)
+                    if isinstance(val, NameDataError):
+                        name_error = True
+                    if replaced_expr != expression:
+                        drilldown_arg = {
+                            'period_id': col_key,
+                            'expr': expression,
+                        }
+                vals.append(val)
+                drilldown_args.append(drilldown_arg)
+            return vals, drilldown_args, name_error
 
-        compute_queue = self.kpi_ids
-        recompute_queue = []
-        while True:
-            for kpi in compute_queue:
-                # build the list of expressions for this kpi
-                expressions = kpi._get_expressions(subkpis)
-
+        def eval_expressions_by_account(expressions, locals_dict):
+            expressions = [e and e.name or 'AccountingNone'
+                           for e in expressions]
+            for account_id, replaced_exprs in \
+                    aep.replace_exprs_by_account_id(expressions):
                 vals = []
                 drilldown_args = []
                 name_error = False
-                for expression in expressions:
-                    replaced_expr = aep.replace_expr(expression)
-                    vals.append(
-                        mis_safe_eval(replaced_expr, locals_dict))
-                    if isinstance(vals[-1], NameDataError):
-                        name_error = True
+                for expression, replaced_expr in \
+                        izip(expressions, replaced_exprs):
+                    vals.append(mis_safe_eval(replaced_expr, locals_dict))
                     if replaced_expr != expression:
                         drilldown_args.append({
                             'period_id': col_key,
                             'expr': expression,
+                            'account_id': account_id,
                         })
                     else:
                         drilldown_args.append(None)
-                if name_error:
-                    recompute_queue.append(kpi)
-                else:
-                    # no error, set it in locals_dict so it can be used
-                    # in computing other kpis
-                    if len(expressions) == 1:
-                        locals_dict[kpi.name] = vals[0]
-                    else:
-                        locals_dict[kpi.name] = SimpleArray(vals)
+                yield account_id, vals, drilldown_args, name_error
 
-                # even in case of name error we set the result in the matrix
-                # so the name error will be displayed if it cannot be
-                # resolved by recomputing later
-                if len(expressions) == 1 and col.colspan > 1:
-                    if isinstance(vals[0], tuple):
-                        vals = vals[0]
-                        assert len(vals) == col.colspan
-                    elif isinstance(vals[0], DataError):
-                        vals = (vals[0],) * col.colspan
-                    else:
-                        raise UserError(_("Probably not your fault... but I'm "
-                                          "really curious to know how you "
-                                          "managed to raise this error so "
-                                          "I can handle one more corner "
-                                          "case!"))
-                if len(drilldown_args) != col.colspan:
-                    drilldown_args = [None] * col.colspan
-                kpi_matrix.set_values(
-                    kpi, col_key, vals, drilldown_args)
+        self._declare_and_compute_col(
+            kpi_matrix, col_key, col_label, col_description, subkpis_filter,
+            locals_dict, eval_expressions, eval_expressions_by_account)
 
-                if not kpi.auto_expand_accounts or name_error:
+    def get_kpis_by_account_id(self, company):
+        """ Return { account_id: set(kpi) } """
+        aep = self._prepare_aep(company)
+        res = defaultdict(set)
+        for kpi in self.kpi_ids:
+            for expression in kpi.expression_ids:
+                if not expression.name:
                     continue
-
-                for account_id, replaced_exprs in \
-                        aep.replace_exprs_by_account_id(expressions):
-                    vals = []
-                    drilldown_args = []
-                    for expression, replaced_expr in \
-                            izip(expressions, replaced_exprs):
-                        vals.append(mis_safe_eval(replaced_expr, locals_dict))
-                        if replaced_expr != expression:
-                            drilldown_args.append({
-                                'period_id': col_key,
-                                'expr': expression,
-                                'account_id': account_id
-                            })
-                        else:
-                            drilldown_args.append(None)
-                    kpi_matrix.set_values_detail_account(
-                        kpi, col_key, account_id, vals, drilldown_args)
-
-            if len(recompute_queue) == 0:
-                # nothing to recompute, we are done
-                break
-            if len(recompute_queue) == len(compute_queue):
-                # could not compute anything in this iteration
-                # (ie real Name errors or cyclic dependency)
-                # so we stop trying
-                break
-            # try again
-            compute_queue = recompute_queue
-            recompute_queue = []
+                account_ids = aep.get_account_ids_for_expr(expression.name)
+                for account_id in account_ids:
+                    res[account_id].add(kpi)
+        return res

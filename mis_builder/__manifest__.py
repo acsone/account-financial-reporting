@@ -4,7 +4,7 @@
 
 {
     'name': 'MIS Builder',
-    'version': '10.0.2.0.2',
+    'version': '10.0.3.0.0',
     'category': 'Reporting',
     'summary': """
         Build 'Management Information System' Reports and Dashboards
@@ -31,11 +31,11 @@
         'report/mis_report_instance_xlsx.xml',
     ],
     'demo': [
+        'tests/mis.report.csv',
         'tests/mis.report.kpi.csv',
         'tests/mis.report.query.csv',
-        'tests/mis.report.csv',
-        'tests/mis.report.instance.period.csv',
         'tests/mis.report.instance.csv',
+        'tests/mis.report.instance.period.csv',
     ],
     'qweb': [
         'static/src/xml/*.xml'
