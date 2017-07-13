@@ -6,8 +6,9 @@ import re
 from collections import defaultdict
 from itertools import izip
 
-from odoo import fields
+from odoo import fields, _
 from odoo.models import expression
+from odoo.exceptions import UserError
 from odoo.tools.safe_eval import safe_eval
 from odoo.tools.float_utils import float_is_zero
 from .accounting_none import AccountingNone
@@ -27,6 +28,13 @@ class AccountingExpressionProcessor(object):
         * accounts is a list of accounts, possibly containing % wildcards
         * an optional domain on move lines allowing filters on eg analytic
           accounts or journal
+        * an optional parameter for rate calculation. this parameter will
+          override the default value set in the report instance.
+          possible values are
+          empty or n: current date exchange ratenow,
+          s: start date of period (date_from)
+          e: end date of period (date_to)
+          d: daily rate of move line date.
 
     Examples:
         * bal[70]: variation of the balance of moves on account 70
@@ -65,11 +73,22 @@ class AccountingExpressionProcessor(object):
     _ACC_RE = re.compile(r"(?P<field>\bbal|\bcrd|\bdeb)"
                          r"(?P<mode>[piseu])?"
                          r"(?P<accounts>_[a-zA-Z0-9]+|\[.*?\])"
-                         r"(?P<domain>\[.*?\])?")
+                         r"(?P<domain>\[.*?\])?"
+                         r"(?P<exchange_rate_date>[send])?")
 
-    def __init__(self, company):
-        self.company = company
-        self.dp = company.currency_id.decimal_places
+    def __init__(self, companies, currency=None, exchange_rate_date='n'):
+        self.companies = companies
+        if not currency:
+            self.currency = companies.mapped('currency_id')
+            if len(self.currency) > 1:
+                raise UserError(_('"If currency_id is not given, \
+                    every companies must have the same currency."'))
+        else:
+            self.currency = currency
+        # exchange_rate_date can be
+        # n (now), s (date_from), e (date_to), d (daily)
+        self.exchange_rate_date = exchange_rate_date
+        self.dp = self.currency.decimal_places
         # before done_parsing: {(domain, mode): set(account_codes)}
         # after done_parsing: {(domain, mode): list(account_ids)}
         self._map_account_ids = defaultdict(set)
@@ -83,9 +102,13 @@ class AccountingExpressionProcessor(object):
         # a first query to get the initial balance and another
         # to get the variation, so it's a bit slower
         self.smart_end = True
+        # daily_rates will store each daily rate on do_query
+        # so they are not calculated many times and improves
+        # rendering speed
+        self.daily_rates = {}
 
     def _load_account_codes(self, account_codes):
-        account_model = self.company.env['account.account']
+        account_model = self.companies.env['account.account']
         exact_codes = set()
         for account_code in account_codes:
             if account_code in self._account_ids_by_code:
@@ -93,19 +116,19 @@ class AccountingExpressionProcessor(object):
             if account_code is None:
                 # None means we want all accounts
                 account_ids = account_model.\
-                    search([('company_id', '=', self.company.id)]).ids
+                    search([('company_id', 'in', self.companies.ids)]).ids
                 self._account_ids_by_code[account_code].update(account_ids)
             elif '%' in account_code:
                 account_ids = account_model.\
                     search([('code', '=like', account_code),
-                            ('company_id', '=', self.company.id)]).ids
+                            ('company_id', 'in', self.companies.ids)]).ids
                 self._account_ids_by_code[account_code].update(account_ids)
             else:
                 # search exact codes after the loop to do less queries
                 exact_codes.add(account_code)
         for account in account_model.\
                 search([('code', 'in', list(exact_codes)),
-                        ('company_id', '=', self.company.id)]):
+                        ('company_id', 'in', self.companies.ids)]):
             self._account_ids_by_code[account.code].add(account.id)
 
     def _parse_match_object(self, mo):
@@ -113,7 +136,7 @@ class AccountingExpressionProcessor(object):
 
         Returns field, mode, [account codes], (domain expression).
         """
-        field, mode, account_codes, domain = mo.groups()
+        field, mode, account_codes, domain, exchange_rate_date = mo.groups()
         if not mode:
             mode = self.MODE_VARIATION
         elif mode == 's':
@@ -128,7 +151,7 @@ class AccountingExpressionProcessor(object):
             account_codes = [None]  # None means we want all accounts
         domain = domain or '[]'
         domain = tuple(safe_eval(domain))
-        return field, mode, account_codes, domain
+        return field, mode, account_codes, domain, exchange_rate_date
 
     def parse_expr(self, expr):
         """Parse an expression, extracting accounting variables.
@@ -138,13 +161,14 @@ class AccountingExpressionProcessor(object):
         account codes to query for each domain and mode.
         """
         for mo in self._ACC_RE.finditer(expr):
-            _, mode, account_codes, domain = self._parse_match_object(mo)
+            _, mode, account_codes, domain, exchange_rate_date = \
+                self._parse_match_object(mo)
             if mode == self.MODE_END and self.smart_end:
                 modes = (self.MODE_INITIAL, self.MODE_VARIATION, self.MODE_END)
             else:
                 modes = (mode, )
             for mode in modes:
-                key = (domain, mode)
+                key = (domain, mode, exchange_rate_date)
                 self._map_account_ids[key].update(account_codes)
 
     def done_parsing(self):
@@ -171,7 +195,8 @@ class AccountingExpressionProcessor(object):
         """
         account_ids = set()
         for mo in self._ACC_RE.finditer(expr):
-            field, mode, account_codes, domain = self._parse_match_object(mo)
+            field, mode, account_codes, domain, exchange_rate_date = \
+                self._parse_match_object(mo)
             for account_code in account_codes:
                 account_ids.update(self._account_ids_by_code[account_code])
         return account_ids
@@ -189,7 +214,8 @@ class AccountingExpressionProcessor(object):
         aml_domains = []
         date_domain_by_mode = {}
         for mo in self._ACC_RE.finditer(expr):
-            field, mode, account_codes, domain = self._parse_match_object(mo)
+            field, mode, account_codes, domain, exchange_rate_date = \
+                self._parse_match_object(mo)
             aml_domain = list(domain)
             account_ids = set()
             for account_code in account_codes:
@@ -226,7 +252,7 @@ class AccountingExpressionProcessor(object):
             # sum from the beginning of time
             date_from_date = fields.Date.from_string(date_from)
             fy_date_from = \
-                self.company.\
+                self.companies.\
                 compute_fiscalyear_dates(date_from_date)['date_from']
             domain = ['|',
                       ('date', '>=', fields.Date.to_string(fy_date_from)),
@@ -238,13 +264,31 @@ class AccountingExpressionProcessor(object):
         elif mode == self.MODE_UNALLOCATED:
             date_from_date = fields.Date.from_string(date_from)
             fy_date_from = \
-                self.company.\
+                self.companies.\
                 compute_fiscalyear_dates(date_from_date)['date_from']
             domain = [('date', '<', fields.Date.to_string(fy_date_from)),
                       ('user_type_id.include_initial_balance', '=', False)]
         if target_move == 'posted':
             domain.append(('move_id.state', '=', 'posted'))
         return expression.normalize_domain(domain)
+
+    def get_company_rates(self, date=None):
+        # get exchange rates for each company with its rouding
+        company_rates = {}
+        cur_model = self.companies.env['res.currency']
+        used_currency_dated = \
+            cur_model.with_context(date=date).browse(self.currency.id)
+        for company in self.companies:
+            if company.currency_id != used_currency_dated:
+                company_currency_dated =\
+                    cur_model.with_context(
+                        date=date).browse(company.currency_id.id)
+                rate = used_currency_dated.rate / company_currency_dated.rate
+            else:
+                rate = 1.0
+            company_rates[company.id] = (rate,
+                                         company.currency_id.decimal_places)
+        return company_rates
 
     def do_queries(self, date_from, date_to,
                    target_move='posted', additional_move_line_filter=None,
@@ -255,18 +299,34 @@ class AccountingExpressionProcessor(object):
         This method must be executed after done_parsing().
         """
         if not aml_model:
-            aml_model = self.company.env['account.move.line']
+            aml_model = self.companies.env['account.move.line']
         else:
-            aml_model = self.company.env[aml_model]
+            aml_model = self.companies.env[aml_model]
+        cur_model = self.companies.env['res.currency']
+        if not self.exchange_rate_date or self.exchange_rate_date == 'n':
+            company_rates = self.get_company_rates()
+        elif self.exchange_rate_date == 'e':
+            company_rates = self.get_company_rates(date_to)
+        elif self.exchange_rate_date == 's':
+            company_rates = self.get_company_rates(date_from)
         # {(domain, mode): {account_id: (debit, credit)}}
         self._data = defaultdict(dict)
         domain_by_mode = {}
         ends = []
         for key in self._map_account_ids:
-            domain, mode = key
+            domain, mode, ex_rate_date = key
+            exchange_rate_date = ex_rate_date
+            if not exchange_rate_date:
+                exchange_rate_date = self.exchange_rate_date
+            if exchange_rate_date == 'n' or not exchange_rate_date:
+                company_rates = self.get_company_rates()
+            elif exchange_rate_date == 'e':
+                company_rates = self.get_company_rates(date_to)
+            elif exchange_rate_date == 's':
+                company_rates = self.get_company_rates(date_from)
             if mode == self.MODE_END and self.smart_end:
                 # postpone computation of ending balance
-                ends.append((domain, mode))
+                ends.append((domain, mode, ex_rate_date))
                 continue
             if mode not in domain_by_mode:
                 domain_by_mode[mode] = \
@@ -277,23 +337,75 @@ class AccountingExpressionProcessor(object):
             if additional_move_line_filter:
                 domain.extend(additional_move_line_filter)
             # fetch sum of debit/credit, grouped by account_id
-            accs = aml_model.read_group(domain,
-                                        ['debit', 'credit', 'account_id'],
-                                        ['account_id'])
-            for acc in accs:
-                debit = acc['debit'] or 0.0
-                credit = acc['credit'] or 0.0
-                if mode in (self.MODE_INITIAL, self.MODE_UNALLOCATED) and \
-                        float_is_zero(debit-credit,
-                                      precision_rounding=self.dp):
-                    # in initial mode, ignore accounts with 0 balance
-                    continue
-                self._data[key][acc['account_id'][0]] = (debit, credit)
+            if self.exchange_rate_date == 'd':
+                query = aml_model._where_calc(domain)
+                from_clause, where_clause, where_clause_params = \
+                    query.get_sql()
+                where_str = where_clause and (" WHERE %s" % where_clause) or ''
+                query_str = """
+                    SELECT
+                        SUM(debit),
+                        SUM(credit),
+                        account_id,
+                        company_currency_id,
+                        date_maturity FROM """ + from_clause + where_str +\
+                    """ GROUP BY
+                        account_id,
+                        company_currency_id,
+                        date_maturity"""
+                aml_model._cr.execute(query_str, where_clause_params)
+                res = aml_model._cr.fetchall()
+                for acc in res:
+                    date = acc[4]
+                    com_cur_id = acc[3]
+                    if not self.daily_rates.get(com_cur_id):
+                        dp = cur_model.browse(com_cur_id).decimal_places
+                        self.daily_rates[com_cur_id] = {'dp': dp}
+                    dp = self.daily_rates[com_cur_id]['dp']
+                    debit = acc[0] or 0.0
+                    credit = acc[1] or 0.0
+                    if mode in (self.MODE_INITIAL, self.MODE_UNALLOCATED) and \
+                            float_is_zero(debit-credit,
+                                          precision_rounding=dp):
+                        # in initial mode, ignore accounts with 0 balance
+                        continue
+                    if not self.daily_rates[com_cur_id].get(date):
+                        com_cur_dated = cur_model.\
+                            with_context(date=date).browse(com_cur_id)
+                        used_cur_dated = cur_model.\
+                            with_context(date=date).browse(self.currency.id)
+                        rate = used_cur_dated.rate / com_cur_dated.rate
+                        self.daily_rates[com_cur_id][date] = rate
+                    rate = self.daily_rates[com_cur_id][date]
+                    if not self._data[key].get(acc[2]):
+                        self._data[key][acc[2]] = (0, 0)
+                    acc_debit = self._data[key][acc[2]][0]
+                    acc_credit = self._data[key][acc[2]][1]
+                    self._data[key][acc[2]] =\
+                        (acc_debit+debit*rate, acc_credit+credit*rate)
+            else:
+                accs = aml_model.read_group(
+                    domain,
+                    ['debit', 'credit', 'account_id', 'company_id'],
+                    ['account_id', 'company_id'], lazy=False)
+                for acc in accs:
+                    rate, dp = company_rates[acc['company_id'][0]]
+                    debit = acc['debit'] or 0.0
+                    credit = acc['credit'] or 0.0
+                    if mode in (self.MODE_INITIAL, self.MODE_UNALLOCATED) and \
+                            float_is_zero(debit-credit,
+                                          precision_rounding=dp):
+                        # in initial mode, ignore accounts with 0 balance
+                        continue
+                    self._data[key][acc['account_id'][0]] =\
+                        (debit*rate, credit*rate)
         # compute ending balances by summing initial and variation
         for key in ends:
-            domain, mode = key
-            initial_data = self._data[(domain, self.MODE_INITIAL)]
-            variation_data = self._data[(domain, self.MODE_VARIATION)]
+            domain, mode, exchange_rate_date = key
+            initial_data = self._data[(domain,
+                    self.MODE_INITIAL, exchange_rate_date)]
+            variation_data = self._data[(domain,
+                    self.MODE_VARIATION, exchange_rate_date)]
             account_ids = set(initial_data.keys()) | set(variation_data.keys())
             for account_id in account_ids:
                 di, ci = initial_data.get(account_id,
@@ -310,8 +422,9 @@ class AccountingExpressionProcessor(object):
         This method must be executed after do_queries().
         """
         def f(mo):
-            field, mode, account_codes, domain = self._parse_match_object(mo)
-            key = (domain, mode)
+            field, mode, account_codes, domain, exchange_rate_date = \
+                self._parse_match_object(mo)
+            key = (domain, mode, exchange_rate_date)
             account_ids_data = self._data[key]
             v = AccountingNone
             for account_code in account_codes:
@@ -345,8 +458,9 @@ class AccountingExpressionProcessor(object):
         This method must be executed after do_queries().
         """
         def f(mo):
-            field, mode, account_codes, domain = self._parse_match_object(mo)
-            key = (domain, mode)
+            field, mode, account_codes, domain, exchange_rate_date = \
+                self._parse_match_object(mo)
+            key = (domain, mode, exchange_rate_date)
             # first check if account_id is involved in
             # the current expression part
             found = False
@@ -378,9 +492,9 @@ class AccountingExpressionProcessor(object):
         account_ids = set()
         for expr in exprs:
             for mo in self._ACC_RE.finditer(expr):
-                field, mode, account_codes, domain = \
+                field, mode, account_codes, domain, exchange_rate_date = \
                     self._parse_match_object(mo)
-                key = (domain, mode)
+                key = (domain, mode, exchange_rate_date)
                 account_ids_data = self._data[key]
                 for account_code in account_codes:
                     for account_id in self._account_ids_by_code[account_code]:
@@ -391,10 +505,10 @@ class AccountingExpressionProcessor(object):
             yield account_id, [self._ACC_RE.sub(f, expr) for expr in exprs]
 
     @classmethod
-    def _get_balances(cls, mode, company, date_from, date_to,
+    def _get_balances(cls, mode, companies, date_from, date_to,
                       target_move='posted'):
         expr = 'deb{mode}[], crd{mode}[]'.format(mode=mode)
-        aep = AccountingExpressionProcessor(company)
+        aep = AccountingExpressionProcessor(companies)
         # disable smart_end to have the data at once, instead
         # of initial + variation
         aep.smart_end = False
@@ -404,58 +518,58 @@ class AccountingExpressionProcessor(object):
         return aep._data[((), mode)]
 
     @classmethod
-    def get_balances_initial(cls, company, date, target_move='posted'):
+    def get_balances_initial(cls, companies, date, target_move='posted'):
         """ A convenience method to obtain the initial balances of all accounts
         at a given date.
 
         It is the same as get_balances_end(date-1).
 
-        :param company:
+        :param companies:
         :param date:
         :param target_move: if 'posted', consider only posted moves
 
         Returns a dictionary: {account_id, (debit, credit)}
         """
-        return cls._get_balances(cls.MODE_INITIAL, company,
+        return cls._get_balances(cls.MODE_INITIAL, companies,
                                  date, date, target_move)
 
     @classmethod
-    def get_balances_end(cls, company, date, target_move='posted'):
+    def get_balances_end(cls, companies, date, target_move='posted'):
         """ A convenience method to obtain the ending balances of all accounts
         at a given date.
 
         It is the same as get_balances_initial(date+1).
 
-        :param company:
+        :param companies:
         :param date:
         :param target_move: if 'posted', consider only posted moves
 
         Returns a dictionary: {account_id, (debit, credit)}
         """
-        return cls._get_balances(cls.MODE_END, company,
+        return cls._get_balances(cls.MODE_END, companies,
                                  date, date, target_move)
 
     @classmethod
-    def get_balances_variation(cls, company, date_from, date_to,
+    def get_balances_variation(cls, companies, date_from, date_to,
                                target_move='posted'):
         """ A convenience method to obtain the variation of the
         balances of all accounts over a period.
 
-        :param company:
+        :param companies:
         :param date:
         :param target_move: if 'posted', consider only posted moves
 
         Returns a dictionary: {account_id, (debit, credit)}
         """
-        return cls._get_balances(cls.MODE_VARIATION, company,
+        return cls._get_balances(cls.MODE_VARIATION, companies,
                                  date_from, date_to, target_move)
 
     @classmethod
-    def get_unallocated_pl(cls, company, date, target_move='posted'):
+    def get_unallocated_pl(cls, companies, date, target_move='posted'):
         """ A convenience method to obtain the unallocated profit/loss
         of the previous fiscal years at a given date.
 
-        :param company:
+        :param companies:
         :param date:
         :param target_move: if 'posted', consider only posted moves
 
@@ -463,6 +577,6 @@ class AccountingExpressionProcessor(object):
         """
         # TODO shoud we include here the accounts of type "unaffected"
         # or leave that to the caller?
-        bals = cls._get_balances(cls.MODE_UNALLOCATED, company,
+        bals = cls._get_balances(cls.MODE_UNALLOCATED, companies,
                                  date, date, target_move)
         return tuple(map(sum, izip(*bals.values())))

@@ -4,6 +4,7 @@
 
 from . import test_accounting_none
 from . import test_aep
+from . import test_multi_company_aep
 from . import test_aggregate
 from . import test_fetch_query
 from . import test_mis_report_instance
