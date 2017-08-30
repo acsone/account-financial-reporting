@@ -30,6 +30,7 @@ PROPS = [
     'suffix',
     'dp',
     'divider',
+    'hide_empty',
 ]
 
 TYPE_NUM = 'num'
@@ -129,6 +130,8 @@ class MisReportKpiStyle(models.Model):
                                 ('1e6', _('M'))],
                                string='Factor',
                                default='1')
+    hide_empty_inherit = fields.Boolean(default=True)
+    hide_empty = fields.Boolean(default=False)
 
     @api.model
     def merge(self, styles):
@@ -269,7 +272,7 @@ class MisReportKpiStyle(models.Model):
         css_attributes = [
             ('font-style', props.font_style),
             ('font-weight', props.font_weight),
-            ('font-size',  props.font_size),
+            ('font-size', props.font_size),
             ('color', props.color),
             ('background-color', props.background_color),
         ]
