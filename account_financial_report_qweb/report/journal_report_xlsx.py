@@ -22,37 +22,45 @@ class JournalXslx(abstract_report_xlsx.AbstractReportXslx):
 
     def _get_report_columns(self, report):
         return {
-            0: {'header': _('Entry'), 'field': 'entry', 'width': 18},
-            1: {'header': _('Date'), 'field': 'date', 'width': 11},
-            2: {'header': _('Account'), 'field': 'account_code', 'width': 9},
-            3: {'header': _('Partner'), 'field': 'partner', 'width': 25},
-            4: {'header': _('Ref - Label'), 'field': 'label', 'width': 40},
+            0: {
+                'header': _('Entry'),
+                'field': 'entry',
+                'width': 18
+            },
+            1: {
+                'header': _('Date'),
+                'field': 'date',
+                'width': 11
+            },
+            2: {
+                'header': _('Account'),
+                'field': 'account_code',
+                'width': 9
+            },
+            3: {
+                'header': _('Partner'),
+                'field': 'partner',
+                'width': 25
+            },
+            4: {
+                'header': _('Ref - Label'),
+                'field': 'label',
+                'width': 40
+            },
             5: {
                 'header': _('Taxes'),
                 'field': 'taxes_description',
-                'width': 8
+                'width': 11
             },
             6: {
-                'header': _('Tax Amount'),
-                'field': 'tax_amount',
-                'type': 'amount',
-                'width': 14
-            },
-            7: {
                 'header': _('Debit'),
                 'field': 'debit',
                 'type': 'amount',
                 'width': 14,
             },
-            8: {
+            7: {
                 'header': _('Credit'),
                 'field': 'credit',
-                'type': 'amount',
-                'width': 14
-            },
-            9: {
-                'header': _('Balance'),
-                'field': 'balance',
                 'type': 'amount',
                 'width': 14
             },
@@ -123,6 +131,10 @@ class JournalXslx(abstract_report_xlsx.AbstractReportXslx):
 
         return [
             [
+                _('Company'),
+                report.company_id.name
+            ],
+            [
                 _('Date range filter'),
                 _('From: %s To: %s') % (report.date_from, report.date_to)
             ],
@@ -141,7 +153,6 @@ class JournalXslx(abstract_report_xlsx.AbstractReportXslx):
         ]
 
     def _generate_report_content(self, workbook, report):
-        # For each journal
         for report_journal in report.report_journal_ids:
             self._generate_journal_content(workbook, report_journal)
 

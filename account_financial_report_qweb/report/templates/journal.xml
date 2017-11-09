@@ -53,43 +53,33 @@
                 </div>
                 <div class="act_as_cell"
                      name="account"
-                     style="width: 100px;">
+                     style="width: 75px;">
                     Account
                 </div>
                 <div class="act_as_cell"
                      name="partner"
-                     style="width: 140px;">
+                     style="width: 160px;">
                     Partner
                 </div>
                 <div class="act_as_cell"
                      name="label"
-                     style="width: 270px;">
+                     style="width: 330px;">
                     Ref - Label
                 </div>
                 <div class="act_as_cell"
                      name="taxes"
-                     style="width: 70px;">
+                     style="width: 80px;">
                     Taxes
                 </div>
                 <div class="act_as_cell amount"
-                     name="taxes_amount"
-                     style="width: 75px;">
-                    Tax Amount
-                </div>
-                <div class="act_as_cell amount"
                      name="debit"
-                     style="width: 75px;">
+                     style="width: 80px;">
                     Debit
                 </div>
                 <div class="act_as_cell amount"
                      name="credit"
-                     style="width: 75px;">
+                     style="width: 80px;">
                     Debit
-                </div>
-                <div class="act_as_cell amount"
-                     name="balance"
-                     style="width: 75px;">
-                    Balance
                 </div>
             </div>
         </div>
@@ -110,20 +100,12 @@
             <div class="act_as_cell"
                  name="taxes"/>
             <div class="act_as_cell amount"
-                 name="tax_amount">
-                <b><span t-field="journal.tax_amount"/></b>
-            </div>
-            <div class="act_as_cell amount"
                  name="debit">
                 <b><span t-field="journal.debit"/></b>
             </div>
             <div class="act_as_cell amount"
                  name="credit">
                 <b><span t-field="journal.credit"/></b>
-            </div>
-            <div class="act_as_cell amount"
-                 name="balance">
-                <b><span t-field="journal.balance"/></b>
             </div>
         </div>
         <div style="width: 1140px !important;border-bottom: 1px solid black !important;height: 1px !important"/>
@@ -170,12 +152,6 @@
             <span t-field="move_line.taxes_description"/>
         </div>
         <div class="act_as_cell amount"
-             name="tax_amount">
-            <t t-if="move_line.tax_amount">
-                <span t-field="move_line.tax_amount"/>
-            </t>
-        </div>
-        <div class="act_as_cell amount"
              name="debit">
             <t t-if="move_line.debit">
                 <span t-field="move_line.debit"/>
@@ -186,10 +162,6 @@
             <t t-if="move_line.credit">
                 <span t-field="move_line.credit"/>
             </t>
-        </div>
-        <div class="act_as_cell amount"
-             name="balance">
-            <span t-field="move_line.balance"/>
         </div>
     </template>
 

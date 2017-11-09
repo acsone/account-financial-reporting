@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
-# Author: Julien Coux
-# Copyright 2016 Camptocamp SA
-# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
-
+# Copyright 2017 ACSONE SA/NV
+# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
 
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -43,6 +41,9 @@ class TestJournalReport(TransactionCase):
         self.income_account = self.AccountObj.search([
             ('user_type_id.name', '=', 'Income')
         ], limit=1)
+        self.payable_account = self.AccountObj.search([
+            ('user_type_id.name', '=', 'Payable')
+        ], limit=1)
 
         self.journal_sale = self.JournalObj.create({
             'name': "Test journal sale",
@@ -57,21 +58,43 @@ class TestJournalReport(TransactionCase):
             'company_id': self.company.id,
         })
 
-        self.tax_15 = self.TaxObj.create({
+        self.tax_15_s = self.TaxObj.create({
             'sequence': 30,
             'name': 'Tax 15.0% (Percentage of Price)',
             'amount': 15.0,
             'amount_type': 'percent',
             'include_base_amount': False,
+            'type_tax_use': 'sale',
         })
 
-        self.tax_20 = self.TaxObj.create({
+        self.tax_20_s = self.TaxObj.create({
+            'sequence': 30,
+            'name': 'Tax 20.0% (Percentage of Price)',
+            'amount': 20.0,
+            'amount_type': 'percent',
+            'include_base_amount': False,
+            'type_tax_use': 'sale',
+        })
+
+        self.tax_15_p = self.TaxObj.create({
             'sequence': 30,
             'name': 'Tax 15.0% (Percentage of Price)',
             'amount': 15.0,
             'amount_type': 'percent',
             'include_base_amount': False,
+            'type_tax_use': 'purchase',
         })
+
+        self.tax_20_p = self.TaxObj.create({
+            'sequence': 30,
+            'name': 'Tax 20.0% (Percentage of Price)',
+            'amount': 20.0,
+            'amount_type': 'percent',
+            'include_base_amount': False,
+            'type_tax_use': 'purchase',
+        })
+
+        self.partner_2 = self.env.ref('base.res_partner_2')
 
     def _add_move(
             self, date, journal,
@@ -107,6 +130,36 @@ class TestJournalReport(TransactionCase):
         self.assertEqual(
             expected_credit,
             sum([journal.credit for journal in report.report_journal_ids])
+        )
+
+    def check_report_debit_credit_taxes(
+            self, report,
+            expected_base_debit, expected_base_credit,
+            expected_tax_debit, expected_tax_credit):
+
+        self.assertEqual(
+            expected_base_debit,
+            sum([
+                journal.base_debit for journal in report.report_tax_line_ids
+            ])
+        )
+        self.assertEqual(
+            expected_base_credit,
+            sum([
+                journal.base_credit for journal in report.report_tax_line_ids
+            ])
+        )
+        self.assertEqual(
+            expected_tax_debit,
+            sum([
+                journal.tax_debit for journal in report.report_tax_line_ids
+            ])
+        )
+        self.assertEqual(
+            expected_tax_credit,
+            sum([
+                journal.tax_credit for journal in report.report_tax_line_ids
+            ])
         )
 
     def test_01_test_total(self):
@@ -158,6 +211,78 @@ class TestJournalReport(TransactionCase):
         report.refresh()
         self.check_report_debit_credit(report, 300, 300)
 
-    def test_02_test_taxes(self):
-        #TODO
-        invoice_values = {}
+    def test_02_test_taxes_out_invoice(self):
+        invoice_values = {
+            'journal_id': self.journal_sale.id,
+            'partner_id': self.partner_2.id,
+            'type': 'out_invoice',
+            'invoice_line_ids': [
+                (0, 0, {
+                    'quantity': 1.0,
+                    'price_unit': 100,
+                    'account_id': self.receivable_account.id,
+                    'name': "Test",
+                    'invoice_line_tax_ids': [(6, 0, [self.tax_15_s.id])],
+                }),
+                (0, 0, {
+                    'quantity': 1.0,
+                    'price_unit': 100,
+                    'account_id': self.receivable_account.id,
+                    'name': "Test",
+                    'invoice_line_tax_ids': [(6, 0, [
+                        self.tax_15_s.id, self.tax_20_s.id
+                    ])],
+                })
+            ]
+        }
+        invoice = self.InvoiceObj.create(invoice_values)
+        invoice.action_invoice_open()
+
+        report = self.ReportJournalQweb.create({
+            'date_from': self.fy_date_start,
+            'date_to': self.fy_date_end,
+            'company_id': self.company.id,
+            'journal_ids': [(6, 0, [self.journal_sale.ids])]
+        })
+        report.compute_data_for_report()
+
+        self.check_report_debit_credit(report, 250, 250)
+        self.check_report_debit_credit_taxes(report, 0, 300, 0, 50)
+
+    def test_02_test_taxes_in_invoice(self):
+        invoice_values = {
+            'journal_id': self.journal_sale.id,
+            'partner_id': self.partner_2.id,
+            'type': 'in_invoice',
+            'invoice_line_ids': [
+                (0, 0, {
+                    'quantity': 1.0,
+                    'price_unit': 100,
+                    'account_id': self.payable_account.id,
+                    'name': "Test",
+                    'invoice_line_tax_ids': [(6, 0, [self.tax_15_p.id])],
+                }),
+                (0, 0, {
+                    'quantity': 1.0,
+                    'price_unit': 100,
+                    'account_id': self.payable_account.id,
+                    'name': "Test",
+                    'invoice_line_tax_ids': [(6, 0, [
+                        self.tax_15_p.id, self.tax_20_p.id
+                    ])],
+                })
+            ]
+        }
+        invoice = self.InvoiceObj.create(invoice_values)
+        invoice.action_invoice_open()
+
+        report = self.ReportJournalQweb.create({
+            'date_from': self.fy_date_start,
+            'date_to': self.fy_date_end,
+            'company_id': self.company.id,
+            'journal_ids': [(6, 0, [self.journal_sale.ids])]
+        })
+        report.compute_data_for_report()
+
+        self.check_report_debit_credit(report, 250, 250)
+        self.check_report_debit_credit_taxes(report, 300, 0, 50, 0)

@@ -11,10 +11,16 @@ class ReportJournalQweb(models.TransientModel):
 
     _name = 'report_journal_qweb'
 
-    date_from = fields.Date()
-    date_to = fields.Date()
+    date_from = fields.Date(
+        required=True
+    )
+    date_to = fields.Date(
+        required=True
+    )
     company_id = fields.Many2one(
-        comodel_name='res.company'
+        comodel_name='res.company',
+        required=True,
+        ondelete='cascade'
     )
     move_target = fields.Selection(
         selection='_get_move_targets',
@@ -22,9 +28,14 @@ class ReportJournalQweb(models.TransientModel):
     )
     journal_ids = fields.Many2many(
         comodel_name='account.journal',
+        required=True,
     )
     report_journal_ids = fields.One2many(
         comodel_name='report_journal_qweb_journal',
+        inverse_name='report_id',
+    )
+    report_tax_line_ids = fields.One2many(
+        comodel_name='report_journal_qweb_journal_tax_line',
         inverse_name='report_id',
     )
 
@@ -185,8 +196,6 @@ class ReportJournalQweb(models.TransientModel):
                 label,
                 debit,
                 credit,
-                balance,
-                tax_amount,
                 tax_id,
                 taxes_description
             )
@@ -208,15 +217,6 @@ class ReportJournalQweb(models.TransientModel):
                 aml.name as label,
                 aml.debit as debit,
                 aml.credit as credit,
-                (aml.debit - aml.credit) as balance,
-                CASE
-                    WHEN
-                        aml.tax_line_id is NOT NULL
-                    THEN
-                        (aml.debit + aml.credit)
-                    ELSE
-                        0
-                END as tax_amount,
                 aml.tax_line_id as tax_id,
                 CASE
                     WHEN
@@ -402,11 +402,6 @@ class ReportJournalQweb(models.TransientModel):
                     SELECT sum(rjqml.debit - rjqml.credit)
                     FROM report_journal_qweb_move_line rjqml
                     WHERE rjqml.report_journal_id = rjqj.id
-                ),
-                tax_amount = (
-                    SELECT sum(rjqml.tax_amount)
-                    FROM report_journal_qweb_move_line rjqml
-                    WHERE rjqml.report_journal_id = rjqj.id
                 )
             WHERE
                 rjqj.report_id = %s
@@ -431,7 +426,9 @@ class ReportJournalQwebJournal(models.TransientModel):
 
     _name = 'report_journal_qweb_journal'
 
-    name = fields.Char()
+    name = fields.Char(
+        required=True,
+    )
     code = fields.Char()
     report_id = fields.Many2one(
         comodel_name='report_journal_qweb',
@@ -455,12 +452,6 @@ class ReportJournalQwebJournal(models.TransientModel):
         digits=DIGITS,
     )
     credit = fields.Float(
-        digits=DIGITS,
-    )
-    balance = fields.Float(
-        digits=DIGITS,
-    )
-    tax_amount = fields.Float(
         digits=DIGITS,
     )
 
@@ -533,12 +524,6 @@ class ReportJournalQwebMoveLine(models.TransientModel):
         digits=DIGITS,
     )
     credit = fields.Float(
-        digits=DIGITS,
-    )
-    balance = fields.Float(
-        digits=DIGITS,
-    )
-    tax_amount = fields.Float(
         digits=DIGITS,
     )
     taxes_description = fields.Char()

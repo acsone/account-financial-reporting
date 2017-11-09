@@ -12,11 +12,16 @@ class JournalReportWizard(models.TransientModel):
     company_id = fields.Many2one(
         comodel_name='res.company',
         default=lambda self: self.env.user.company_id,
-        string='Company'
+        string='Company',
+        required=True,
+        ondelete='cascade',
     )
     date_range_id = fields.Many2one(
         comodel_name='date.range',
-        string='Date range'
+        string='Date range',
+        domain="['|', "
+               "('company_id', '=', False),"
+               "('company_id', '=', company_id)]",
     )
     date_from = fields.Date(
         string="Start date",
@@ -30,6 +35,7 @@ class JournalReportWizard(models.TransientModel):
         comodel_name='account.journal',
         string="Journals",
         domain="[('company_id', '=', company_id)]",
+        required=True,
     )
     move_target = fields.Selection(
         selection='_get_move_targets',
