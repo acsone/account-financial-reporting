@@ -249,8 +249,6 @@ class GeneralLedgerReportCompute(models.TransientModel):
 
         if with_partners:
             self._inject_partner_values()
-            if not self.filter_partner_ids:
-                self._inject_partner_values(only_empty_partner=True)
 
         # Add unaffected earnings account
         if (not self.filter_account_ids or
