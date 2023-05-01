@@ -1144,7 +1144,7 @@ SELECT
             """
         query_inject_move_line += """
     CONCAT_WS(' - ', NULLIF(ml.ref, ''), NULLIF(ml.name, '')) AS label,
-    aa.name AS cost_center,
+    CONCAT_WS(' - ', aa.code, aa.name) AS cost_center,
     ml.debit,
     ml.credit,
         """
