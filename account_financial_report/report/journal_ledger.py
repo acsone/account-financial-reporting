@@ -207,6 +207,7 @@ class JournalLedgerReport(models.AbstractModel):
         )
         move_line_ids_taxes_data = {}
         if move_lines:
+            lang = self.env.context.get("lang", "en_US")
             # Get the taxes ids for the move lines
             query_taxes_params = self._get_query_taxes_params(move_lines)
             query_taxes = self._get_query_taxes()
@@ -221,8 +222,12 @@ class JournalLedgerReport(models.AbstractModel):
                 if move_line_id not in move_line_ids_taxes_data.keys():
                     move_line_ids_taxes_data[move_line_id] = {}
                 move_line_ids_taxes_data[move_line_id][account_tax_id] = {
-                    "name": tax_name,
-                    "description": tax_description,
+                    "name": tax_name.get(lang) or tax_name.get("en_US"),
+                    "description": (
+                        tax_description.get(lang) or tax_description.get("en_US")
+                        if tax_description
+                        else False
+                    ),
                 }
         Move_Lines = {}
         auto_sequence = len(move_ids)
@@ -331,6 +336,7 @@ class JournalLedgerReport(models.AbstractModel):
             partner_ids_data = move_lines[3]
             currency_ids_data = move_lines[4]
             tax_line_ids_data = move_lines[5]
+            move_line_ids_taxes_data = move_lines[6]
         for move_data in moves_data:
             move_id = move_data["move_id"]
             move_data["report_move_lines"] = []
