@@ -7,7 +7,7 @@ import time
 from datetime import date
 
 from odoo import api, fields
-from odoo.tests import tagged
+from odoo.tests import Form, tagged
 
 from odoo.addons.account.tests.common import AccountTestInvoicingCommon
 
@@ -731,3 +731,49 @@ class TestGeneralLedgerReport(AccountTestInvoicingCommon):
         wizard.onchange_date_range_id()
         self.assertEqual(wizard.date_from, date(2018, 1, 1))
         self.assertEqual(wizard.date_to, date(2018, 12, 31))
+
+    def test_05_onchange_account_range_no_typeerror(self):
+        company_id = self.env.user.company_id.id
+        acc_from = self.env["account.account"].create(
+            {
+                "code": "TEST43000",
+                "name": "Test From",
+                "account_type": "asset_receivable",
+                "company_ids": [(6, 0, [company_id])],
+            }
+        )
+        acc_to = self.env["account.account"].create(
+            {
+                "code": "TEST43005",
+                "name": "Test To",
+                "account_type": "asset_receivable",
+                "company_ids": [(6, 0, [company_id])],
+            }
+        )
+        acc_out = self.env["account.account"].create(
+            {
+                "code": "TEST44000",
+                "name": "Test Out",
+                "account_type": "asset_receivable",
+                "company_ids": [(6, 0, [company_id])],
+            }
+        )
+        wizard_form = Form(
+            self.env["general.ledger.report.wizard"].with_context(company_id=company_id)
+        )
+        wizard_form.account_code_from = acc_from
+        wizard_form.account_code_to = acc_to
+        wizard = wizard_form.save()
+        self.assertIn(
+            acc_from,
+            wizard.account_ids,
+            "The starting account should be in the filter.",
+        )
+        self.assertIn(
+            acc_to, wizard.account_ids, "The ending account should be in the filter."
+        )
+        self.assertNotIn(
+            acc_out,
+            wizard.account_ids,
+            "Accounts out of the range should NOT be in the filter.",
+        )
