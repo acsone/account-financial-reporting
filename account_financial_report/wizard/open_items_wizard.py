@@ -72,19 +72,16 @@ class OpenItemsReportWizard(models.TransientModel):
             and self.account_code_to
             and self.account_code_to.code.isdigit()
         ):
-            start_range = self.account_code_from.code
-            end_range = self.account_code_to.code
-            self.account_ids = self.env["account.account"].search(
-                [
-                    ("code", ">=", start_range),
-                    ("code", "<=", end_range),
-                    ("reconcile", "=", True),
-                ]
-            )
+            start_range = int(self.account_code_from.code)
+            end_range = int(self.account_code_to.code)
+            domain = [
+                ("code", ">=", start_range),
+                ("code", "<=", end_range),
+                ("reconcile", "=", True),
+            ]
             if self.company_id:
-                self.account_ids = self.account_ids.filtered(
-                    lambda a: self.company_id in a.company_ids
-                )
+                domain.append(("company_ids", "in", [self.company_id.id]))
+            self.account_ids = self.env["account.account"].search(domain)
         return {
             "domain": {
                 "account_code_from": [("reconcile", "=", True)],
